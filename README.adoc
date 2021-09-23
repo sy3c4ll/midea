@@ -1,0 +1,17 @@
+= MIDI-Composer
+
+An attempt at using machine learning techniques for machine composition, straight to MIDI.
+
+== Credits
+
+This project uses the following libraries:
+
+* https://gitlab.com/libeigen/eigen.git/[Eigen]
+* https://github.com/craigsapp/midifile.git/[Midifile]
+* https://github.com/thestk/rtmidi.git/[RtMidi]
+* https://github.com/nlohmann/json.git/[JSON for Modern C++]
+
+Also, the model is trained with https://magenta.tensorflow.org/datasets/maestro/[The MAESTRO Dataset].
+
+Massive thanks to their developers! This project could never have existed without their hard work.
+
