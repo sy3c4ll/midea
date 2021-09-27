@@ -45,7 +45,7 @@ EXTEN     =
 #
 
 SRCDIR    = src
-INCDIR    = src/eigen
+INCDIR    = src/*/
 TARGDIR   = bin
 COMPILER  = LANG=C $(ENV) g++ $(ARCH)
 DEFINES   = 
@@ -71,13 +71,6 @@ POSTFLAGS =
 ###########################################################################
 
 
-# Setting up the directory paths to search for program source code
-vpath %.cpp $(SRCDIR)
-
-# Generating a list of the programs to compile with "make build"
-LIBS=$(wildcard $(SRCDIR)/*/*.cpp)
-
-
 ##############################
 ##
 ## Targets:
@@ -89,24 +82,28 @@ LIBS=$(wildcard $(SRCDIR)/*/*.cpp)
 
 info:
 	@echo ""
-	@echo This makefile will compile a specific submodule with all required dependencies. Run:
-	@echo "  make <submodule_name>"
-	@echo to build with all libraries.
+	@echo All directories inside ./$(SRCDIR)/ are treated as libraries, and thus are linked automatically.
+	@echo All files inside ./$(SRCDIR)/ that are not directories are treated as standalone programs,
+	@echo and are ignored unless set explicitly as build target.
+	@echo Running this makefile will compile such specific program with all known libraries. Run:
+	@echo "  make <program_name>"
+	@echo For example, to build ./$(SRCDIR)/main.cpp with libraries in ./$(SRCDIR)/lib/ type:
+	@echo "  make main"
 	@echo Executables will be placed in ./$(TARGDIR)/.
 	@echo ""
 
 
 clean:
-	@echo Cleaning executables directory...
-	-rm -rf bin
+	@echo [*] Cleaning executables directory...
+	@-rm -rf bin
 
 
 %:
 ifeq ($(wildcard $(TARGDIR)),)
-	-mkdir -p $(TARGDIR)
+	@-mkdir -p $(TARGDIR)
 endif
-	@echo [CC] Compiling $@...
-	$(COMPILER) $(PREFLAGS) $(LIBS) $(SRCDIR)/$@.cpp -o $(TARGDIR)/$@$(EXTEN) $< $(POSTFLAGS)
-	@echo [CC] Done.
+	@echo [*] CC: Compiling $@...
+	@$(COMPILER) $(PREFLAGS) $(SRCDIR)/*/*.cpp $(SRCDIR)/$@.cpp -o $(TARGDIR)/$@$(EXTEN) $< $(POSTFLAGS)
+	@echo [*] CC: Done.
 
 

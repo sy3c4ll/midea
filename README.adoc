@@ -1,4 +1,4 @@
-= MIDI-Composer
+= MIDea
 
 An attempt at using machine learning techniques for machine composition, straight to MIDI.
 
