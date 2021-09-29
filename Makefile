@@ -54,8 +54,8 @@ PREFLAGS  = -O3 -Wall $(DEFINES)
 #PREFLAGS += -static
 
 # Using C++ 2011 standard:
-PREFLAGS += -std=c++11 -I$(INCDIR)
-POSTFLAGS =
+PREFLAGS += -std=c++11 -D__LINUX_ALSA__ -I$(INCDIR)
+POSTFLAGS = -lasound -lpthread
 
 # MinGW compiling setup (used to compile for Microsoft Windows but actual
 # compiling can be done in Linux). You have to install MinGW and these
