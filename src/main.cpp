@@ -3,6 +3,7 @@
 #include "rtmidi/RtMidi.h"
 #include "json/json.hpp"
 #include <cstring>
+#include <iomanip>
 #include <iostream>
 #include <thread>
 
@@ -15,19 +16,19 @@
 #define NULLDEVICE "nul"
 #endif
 
-#define LAYER_NUM 2
+#define LAYER_NUM 3
 #define IO_SIZE 4
-#define H_SIZE 6
-#define EPOCH_NUM 2
+#define H_SIZE 10
+#define EPOCH_NUM 50
 #define MINI_BATCH_SIZE 100
-#define EPOCH_SAMPLE_PERIOD 1
-#define SAMPLE_SIZE 10
-#define ACT_FUNC h_swish
-#define NORM_FUNC relu1
+#define EPOCH_SAMPLE_PERIOD 10
+#define SAMPLE_SIZE 50
+#define MAX_BATCH_SIZE 30000
+#define ACT_FUNC tanh
 #define LEARNING_RATE 0.01
 #define NOTE_ON 0x90
 #define T_MIN 0
-#define T_MAX 10
+#define T_MAX 3
 #define N_MIN 0x00
 #define N_MAX 0x7f
 #define A_MIN 0x01
@@ -35,6 +36,8 @@
 #define MAX_PATH_LEN 0xff
 #define MAX_FILE_NUM 5000
 #define DATA_DIR "./data/"
+#define MODEL_DIR "./model/"
+#define SAMPLE_DIR "./sample/"
 #define METADATA_FILE "maestro-v3.0.0.json"
 #define MIDI_OUT 1
 #define TPQ 960
@@ -47,20 +50,24 @@ typedef struct model {
 
 inline double min(double x, double y) { return x < y ? x : y; }
 inline double max(double x, double y) { return x > y ? x : y; }
-inline double round(double x) { return (int)(x + 0.5); }
-inline double h_swish(double x) { return x * min(max(x + 3, 0), 6) / 6; }
-inline double relu1(double x) { return min(max(x, 0), 1); }
+inline double cap(double x) { return min(max(x, -1), 1); }
 
 Eigen::MatrixXd map(Eigen::MatrixXd M, void *func);
-model *mset_zero(model *m);
-model *mset_random(model *m);
+model *mset_zero(model *x);
+model *mset_random(model *x);
+model *mop_add(model *x, model y);
+model *mop_sub(model *x, model y);
+model *mop_mult(model *x, double y);
+model *mop_div(model *x, double y);
+model *msv_load(model *x, char *path);
+model *msv_save(model *x, char *path);
 Eigen::VectorXd predict(model *m, Eigen::VectorXd x);
-Eigen::VectorXd output(Eigen::VectorXd x);
+Eigen::VectorXd encode(Eigen::VectorXd x);
+Eigen::VectorXd decode(Eigen::VectorXd x);
 void play_midi(RtMidiOut *midiout, smf::MidiFile midi);
-double loss(model m, smf::MidiFile *midi);
-model *grad_desc(model *m, model *grad, double cost, size_t t);
 smf::MidiFile sample(model m, Eigen::VectorXd *seq, int seqsize);
-void train(model *m, smf::MidiFile *midi, size_t batch_size,
+model grad_desc(model m, smf::MidiFile *midi, double *loss);
+void train(model *m, smf::MidiFile *midi, size_t batch_size, size_t sepoch,
            RtMidiOut *midiout);
 
 int main(int argc, char **argv) {
@@ -72,16 +79,15 @@ int main(int argc, char **argv) {
   freopen(LOGFILE, "w", stderr);
 #endif /* LOGFILE */
 
-  model *m = mset_random(new model);
-
-  std::cout
-      << "[*] Model layers, weights and biases initialised with random values"
-      << std::endl;
-
   char path[MAX_PATH_LEN] = "";
 
-  strcpy(path, DATA_DIR);
-  strcat(path, METADATA_FILE);
+  model *m = mset_random(new model);
+  sprintf(path, "%smodel-%s.json", MODEL_DIR, argv[1]);
+  // msv_load(m, path);
+
+  std::cout << "[*] Model layers, weights and biases initialised" << std::endl;
+
+  sprintf(path, "%s%s", DATA_DIR, METADATA_FILE);
   nlohmann::json md = nlohmann::json::parse(std::ifstream(path));
   std::cout << "[*] Metadata parsed from " << path << std::endl;
 
@@ -90,8 +96,7 @@ int main(int argc, char **argv) {
 
   for (nlohmann::json::reference midi_data : md["midi_filename"]) {
 
-    strcpy(path, DATA_DIR);
-    strcat(path, midi_data.get<std::string>().c_str());
+    sprintf(path, "%s%s", DATA_DIR, midi_data.get<std::string>().c_str());
     midi[batch_num].read(path);
 
     if (!midi[batch_num].status()) {
@@ -107,26 +112,24 @@ int main(int argc, char **argv) {
 
   RtMidiOut *midiout = NULL;
 
+#ifdef MIDI_OUT
   try {
     midiout = new RtMidiOut();
     midiout->openPort(MIDI_OUT);
   } catch (RtMidiError &e) {
-    std::cerr << "[!] Unable to open MIDI output ports, writing to file instead"
-              << std::endl
-              << "    Details:" << std::endl;
-    e.printMessage();
-    delete midiout;
-    midiout = NULL;
+    std::cerr << "[!] Unable to open MIDI output ports, exiting..."
+              << std::endl;
+    exit(0);
   }
   if (!midiout->isPortOpen()) {
-    std::cerr << "[!] Unable to open MIDI output ports, writing to file instead"
+    std::cerr << "[!] Unable to open MIDI output ports, exiting..."
               << std::endl;
-    delete midiout;
-    midiout = NULL;
+    exit(0);
   }
   std::cout << "[*] Connected to MIDI output port " << MIDI_OUT << std::endl;
+#endif
 
-  train(m, midi, batch_num, midiout);
+  train(m, midi, batch_num, (size_t)atoi(argv[1]), midiout);
 
   std::cout << "[*] Model successfully trained over " << EPOCH_NUM
             << " epochs, quitting..." << std::endl;
@@ -145,44 +148,121 @@ Eigen::MatrixXd map(Eigen::MatrixXd M, double (*func)(double)) {
   return M;
 }
 
-model *mset_zero(model *m) {
+model *mset_zero(model *x) {
 
   for (size_t i = 0; i < LAYER_NUM; i++)
-    m->a[i] = Eigen::VectorXd::Zero(H_SIZE);
+    x->a[i] = Eigen::VectorXd::Zero(H_SIZE);
 
   for (size_t i = 1; i < LAYER_NUM; i++)
-    m->wxy[i] = Eigen::MatrixXd::Zero(H_SIZE, H_SIZE);
-  m->wxy[0] = Eigen::MatrixXd::Zero(H_SIZE, IO_SIZE);
-  m->wxy[LAYER_NUM] = Eigen::MatrixXd::Zero(IO_SIZE, H_SIZE);
+    x->wxy[i] = Eigen::MatrixXd::Zero(H_SIZE, H_SIZE);
+  x->wxy[0] = Eigen::MatrixXd::Zero(H_SIZE, IO_SIZE);
+  x->wxy[LAYER_NUM] = Eigen::MatrixXd::Zero(IO_SIZE, H_SIZE);
 
   for (size_t i = 0; i < LAYER_NUM; i++)
-    m->waa[i] = Eigen::MatrixXd::Zero(H_SIZE, H_SIZE);
+    x->waa[i] = Eigen::MatrixXd::Zero(H_SIZE, H_SIZE);
 
   for (size_t i = 0; i < LAYER_NUM; i++)
-    m->b[i] = Eigen::VectorXd::Zero(H_SIZE);
-  m->b[LAYER_NUM] = Eigen::VectorXd::Zero(IO_SIZE);
+    x->b[i] = Eigen::VectorXd::Zero(H_SIZE);
+  x->b[LAYER_NUM] = Eigen::VectorXd::Zero(IO_SIZE);
 
-  return m;
+  return x;
 }
 
-model *mset_random(model *m) {
+model *mset_random(model *x) {
 
   for (size_t i = 0; i < LAYER_NUM; i++)
-    m->a[i] = Eigen::VectorXd::Random(H_SIZE);
+    x->a[i] = Eigen::VectorXd::Random(H_SIZE);
 
   for (size_t i = 1; i < LAYER_NUM; i++)
-    m->wxy[i] = Eigen::MatrixXd::Random(H_SIZE, H_SIZE);
-  m->wxy[0] = Eigen::MatrixXd::Random(H_SIZE, IO_SIZE);
-  m->wxy[LAYER_NUM] = Eigen::MatrixXd::Random(IO_SIZE, H_SIZE);
+    x->wxy[i] = Eigen::MatrixXd::Random(H_SIZE, H_SIZE);
+  x->wxy[0] = Eigen::MatrixXd::Random(H_SIZE, IO_SIZE);
+  x->wxy[LAYER_NUM] = Eigen::MatrixXd::Random(IO_SIZE, H_SIZE);
 
   for (size_t i = 0; i < LAYER_NUM; i++)
-    m->waa[i] = Eigen::MatrixXd::Random(H_SIZE, H_SIZE);
+    x->waa[i] = Eigen::MatrixXd::Random(H_SIZE, H_SIZE);
 
   for (size_t i = 0; i < LAYER_NUM; i++)
-    m->b[i] = Eigen::VectorXd::Random(H_SIZE);
-  m->b[LAYER_NUM] = Eigen::VectorXd::Random(IO_SIZE);
+    x->b[i] = Eigen::VectorXd::Random(H_SIZE);
+  x->b[LAYER_NUM] = Eigen::VectorXd::Random(IO_SIZE);
 
-  return m;
+  return x;
+}
+
+model *mop_add(model *x, model y) {
+
+  for (size_t i = 0; i < LAYER_NUM + 1; i++)
+    x->wxy[i] += y.wxy[i], x->b[i] += y.b[i];
+  for (size_t i = 0; i < LAYER_NUM; i++)
+    x->waa[i] += y.waa[i], x->a[i] += y.a[i];
+  return x;
+}
+
+model *mop_sub(model *x, model y) {
+
+  for (size_t i = 0; i < LAYER_NUM + 1; i++)
+    x->wxy[i] -= y.wxy[i], x->b[i] -= y.b[i];
+  for (size_t i = 0; i < LAYER_NUM; i++)
+    x->waa[i] -= y.waa[i], x->a[i] -= y.a[i];
+  return x;
+}
+
+model *mop_mult(model *x, double y) {
+
+  for (size_t i = 0; i < LAYER_NUM + 1; i++)
+    x->wxy[i] *= y, x->b[i] *= y;
+  for (size_t i = 0; i < LAYER_NUM; i++)
+    x->waa[i] *= y, x->a[i] *= y;
+  return x;
+}
+
+model *mop_div(model *x, double y) {
+
+  for (size_t i = 0; i < LAYER_NUM + 1; i++)
+    x->wxy[i] /= y, x->b[i] /= y;
+  for (size_t i = 0; i < LAYER_NUM; i++)
+    x->waa[i] /= y, x->a[i] /= y;
+  return x;
+}
+
+model *msv_load(model *x, char *path) {
+
+  nlohmann::json sv = nlohmann::json::parse(std::ifstream(path));
+  for (size_t i = 0; i < LAYER_NUM + 1; i++)
+    for (size_t j = 0; j < (size_t)x->wxy[i].rows(); j++)
+      for (size_t k = 0; k < (size_t)x->wxy[i].cols(); k++)
+        x->wxy[i](j, k) = sv["wxy"][i][j][k];
+  for (size_t i = 0; i < LAYER_NUM; i++)
+    for (size_t j = 0; j < (size_t)x->waa[i].rows(); j++)
+      for (size_t k = 0; k < (size_t)x->waa[i].cols(); k++)
+        x->waa[i](j, k) = sv["waa"][i][j][k];
+  for (size_t i = 0; i < LAYER_NUM + 1; i++)
+    for (size_t j = 0; j < (size_t)x->b[i].rows(); j++)
+      x->b[i](j) = sv["b"][i][j];
+  for (size_t i = 0; i < LAYER_NUM; i++)
+    for (size_t j = 0; j < (size_t)x->a[i].rows(); j++)
+      x->a[i](j) = sv["a"][i][j];
+  return x;
+}
+
+model *msv_save(model *x, char *path) {
+
+  nlohmann::json sv;
+  for (size_t i = 0; i < LAYER_NUM + 1; i++)
+    for (size_t j = 0; j < (size_t)x->wxy[i].rows(); j++)
+      for (size_t k = 0; k < (size_t)x->wxy[i].cols(); k++)
+        sv["wxy"][i][j][k] = x->wxy[i](j, k);
+  for (size_t i = 0; i < LAYER_NUM; i++)
+    for (size_t j = 0; j < (size_t)x->waa[i].rows(); j++)
+      for (size_t k = 0; k < (size_t)x->waa[i].cols(); k++)
+        sv["waa"][i][j][k] = x->waa[i](j, k);
+  for (size_t i = 0; i < LAYER_NUM + 1; i++)
+    for (size_t j = 0; j < (size_t)x->b[i].rows(); j++)
+      sv["b"][i][j] = x->b[i](j);
+  for (size_t i = 0; i < LAYER_NUM; i++)
+    for (size_t j = 0; j < (size_t)x->a[i].rows(); j++)
+      sv["a"][i][j] = x->a[i](j);
+  std::ofstream(path) << std::setw(2) << sv << std::endl;
+  return x;
 }
 
 Eigen::VectorXd predict(model *m, Eigen::VectorXd x) {
@@ -192,16 +272,26 @@ Eigen::VectorXd predict(model *m, Eigen::VectorXd x) {
     m->a[i] =
         map(m->wxy[i] * m->a[i - 1] + m->waa[i] * m->a[i] + m->b[i], ACT_FUNC);
 
-  return m->wxy[LAYER_NUM] * m->a[LAYER_NUM - 1] + m->b[LAYER_NUM];
+  return map(m->wxy[LAYER_NUM] * m->a[LAYER_NUM - 1] + m->b[LAYER_NUM],
+             ACT_FUNC);
 }
 
-Eigen::VectorXd output(Eigen::VectorXd x) {
+Eigen::VectorXd encode(Eigen::VectorXd x) {
 
-  x = map(x, NORM_FUNC);
-  x(0) = round(x(0) * (T_MAX - T_MIN) + T_MIN),
-  x(1) = round(x(1) * (T_MAX - T_MIN) + T_MIN),
-  x(2) = round(x(2) * (N_MAX - N_MIN) + N_MIN),
-  x(3) = round(x(3) * (A_MAX - A_MIN) + A_MIN);
+  x(0) = (x(0) - T_MIN) / (T_MAX - T_MIN) * 2 - 1;
+  x(1) = (x(1) - T_MIN) / (T_MAX - T_MIN) * 2 - 1;
+  x(2) = (x(2) - N_MIN) / (N_MAX - N_MIN) * 2 - 1;
+  x(3) = (x(3) - A_MIN) / (A_MAX - A_MIN) * 2 - 1;
+  return x;
+}
+
+Eigen::VectorXd decode(Eigen::VectorXd x) {
+
+  map(x, cap);
+  x(0) = (x(0) + 1) * (T_MAX - T_MIN) / 2 + T_MIN;
+  x(1) = (x(1) + 1) * (T_MAX - T_MIN) / 2 + T_MIN;
+  x(2) = round((x(2) + 1) * (N_MAX - N_MIN) / 2 + N_MIN);
+  x(3) = round((x(3) + 1) * (A_MAX - A_MIN) / 2 + A_MIN);
   return x;
 }
 
@@ -228,51 +318,6 @@ void play_midi(RtMidiOut *midiout, smf::MidiFile midi) {
   return;
 }
 
-double loss(model m, smf::MidiFile midi) {
-
-  if (!midi.status()) {
-    std::cerr
-        << "[!] Unable to parse MIDI data from arguments, skipping batch..."
-        << std::endl;
-    return 0;
-  }
-
-  size_t batch_size = 0;
-  double batch_loss = 0;
-
-  midi.absoluteTicks();
-  midi.joinTracks();
-  midi.doTimeAnalysis();
-  midi.linkNotePairs();
-
-  Eigen::VectorXd x(IO_SIZE), y(IO_SIZE);
-  double ptime = 0;
-  bool init = false;
-
-  for (size_t i = 0; i < (size_t)midi[0].size(); i++)
-    if (midi[0][i].isNoteOn()) {
-
-      batch_size++;
-
-      x << ((midi[0][i].seconds - ptime) - T_MIN) / (T_MAX - T_MIN),
-          (midi[0][i].getDurationInSeconds() - T_MIN) / (T_MAX - T_MIN),
-          ((double)midi[0][i][1] - N_MIN) / (N_MAX - N_MIN),
-          ((double)midi[0][i][2] - A_MIN) / (A_MAX - A_MIN);
-
-      if (init)
-        for (size_t j = 0; j < IO_SIZE; j++)
-          batch_loss += (x(j) - y(j)) * (x(j) - y(j));
-
-      y = predict(&m, x);
-      ptime = midi[0][i].seconds;
-      init = true;
-    }
-
-  return batch_loss / batch_size;
-}
-
-model *grad_desc(model *m, model *grad, double cost, size_t t) { return grad; }
-
 smf::MidiFile sample(model m, Eigen::VectorXd *seq, int seqsize) {
 
   smf::MidiFile midi;
@@ -297,9 +342,8 @@ smf::MidiFile sample(model m, Eigen::VectorXd *seq, int seqsize) {
 
       std::cout << "[*] generate: Recorded pre-entered note " << (int)seq[i](2)
                 << " of attack " << (int)seq[i](3) << " ON to "
-                << (int)((atime + seq[i](0)) * TPQ * BPM / 60) << " and OFF to "
-                << (int)((atime + seq[i](0) + seq[i](1)) * TPQ * BPM / 60)
-                << std::endl;
+                << atime + seq[i](0) << " and OFF to "
+                << atime + seq[i](0) + seq[i](1) << std::endl;
 
       atime += seq[i](0);
     }
@@ -308,7 +352,7 @@ smf::MidiFile sample(model m, Eigen::VectorXd *seq, int seqsize) {
 
   } else {
 
-    x << 0.5, 0.5, 60, 64;
+    x = decode(Eigen::VectorXd::Random(4));
 
     note[1] = x(2), note[2] = x(3);
     midi.addEvent(1, (int)((atime + x(0)) * TPQ * BPM / 60), note);
@@ -317,9 +361,8 @@ smf::MidiFile sample(model m, Eigen::VectorXd *seq, int seqsize) {
     midi.addEvent(1, (int)((atime + x(0) + x(1)) * TPQ * BPM / 60), note);
 
     std::cout << "[*] generate: Recorded pre-entered note " << (int)x(2)
-              << " of attack " << (int)x(3) << " ON to "
-              << (int)((atime + x(0)) * TPQ * BPM / 60) << " and OFF to "
-              << (int)((atime + x(0) + x(1)) * TPQ * BPM / 60) << std::endl;
+              << " of attack " << (int)x(3) << " ON to " << atime + x(0)
+              << " and OFF to " << atime + x(0) + x(1) << std::endl;
 
     atime += x(0);
   }
@@ -327,7 +370,7 @@ smf::MidiFile sample(model m, Eigen::VectorXd *seq, int seqsize) {
   for (size_t i = 0; i < SAMPLE_SIZE; i++) {
 
     x = predict(&m, x);
-    n = output(x);
+    n = decode(x);
 
     note[1] = n(2), note[2] = n(3);
     midi.addEvent(1, (int)((atime + n(0)) * TPQ * BPM / 60), note);
@@ -336,9 +379,8 @@ smf::MidiFile sample(model m, Eigen::VectorXd *seq, int seqsize) {
     midi.addEvent(1, (int)((atime + n(0) + n(1)) * TPQ * BPM / 60), note);
 
     std::cout << "[*] generate: Recorded generated note " << (int)n(2)
-              << " of attack " << (int)n(3) << " ON to "
-              << (int)((atime + n(0)) * TPQ * BPM / 60) << " and OFF to "
-              << (int)((atime + n(0) + n(1)) * TPQ * BPM / 60) << std::endl;
+              << " of attack " << (int)n(3) << " ON to " << atime + n(0)
+              << " and OFF to " << atime + n(0) + n(1) << std::endl;
 
     atime += n(0);
   }
@@ -347,53 +389,135 @@ smf::MidiFile sample(model m, Eigen::VectorXd *seq, int seqsize) {
   return midi;
 }
 
-void train(model *m, smf::MidiFile *midi, size_t batch_num,
+model grad_desc(model m, smf::MidiFile midi, double *loss) {
+
+  model grad;
+  mset_zero(&grad);
+
+  if (!midi.status()) {
+    std::cerr
+        << "[!] Unable to parse MIDI data from arguments, skipping batch..."
+        << std::endl;
+    return grad;
+  }
+
+  midi.absoluteTicks();
+  midi.joinTracks();
+  midi.doTimeAnalysis();
+  midi.linkNotePairs();
+
+  size_t batch_size = 0;
+  Eigen::VectorXd x[MAX_BATCH_SIZE], y[MAX_BATCH_SIZE],
+      a[MAX_BATCH_SIZE][LAYER_NUM], d;
+  double ptime = 0;
+
+  *loss = 0;
+
+  for (size_t i = 0; i < (size_t)midi[0].size(); i++)
+    if (midi[0][i].isNoteOn()) {
+
+      batch_size++;
+
+      for (size_t j = 0; j < LAYER_NUM; j++)
+        a[batch_size - 1][j] = m.a[j];
+
+      x[batch_size - 1].resize(IO_SIZE);
+      x[batch_size - 1] << midi[0][i].seconds - ptime,
+          midi[0][i].getDurationInSeconds(), midi[0][i][1], midi[0][i][2];
+      x[batch_size - 1] = encode(x[batch_size - 1]);
+
+      y[batch_size - 1] = predict(&m, x[batch_size - 1]);
+
+      if (batch_size > 1)
+        for (size_t j = 0; j < IO_SIZE; j++)
+          *loss += (x[batch_size - 1](j) - y[batch_size - 2](j)) *
+                   (x[batch_size - 1](j) - y[batch_size - 2](j)) / IO_SIZE;
+
+      ptime = midi[0][i].seconds;
+    }
+
+  *loss /= batch_size;
+
+  for (size_t i = batch_size; i > 0; i--) {
+
+    if (i > 1) {
+      d = y[i - 2] - x[i - 1];
+      for (size_t k = 0; k < IO_SIZE; k++)
+        d(k) *= 1 - y[i - 2](k) * y[i - 2](k);
+    }
+
+    for (size_t j = LAYER_NUM; j > 0; j--) {
+
+      if (i < batch_size) {
+        for (size_t k = 0; k < H_SIZE; k++)
+          grad.a[j - 1](k) *= 1 - a[i][j - 1](k) * a[i][j - 1](k);
+        grad.waa[j - 1] = grad.a[j - 1] * a[i - 1][j - 1].transpose();
+        grad.a[j - 1] = m.waa[j - 1].transpose() * grad.a[j - 1];
+      }
+
+      if (i > 1) {
+        grad.wxy[j] += d * a[i - 1][j - 1].transpose();
+        grad.b[j] += d;
+        grad.a[j - 1] += m.wxy[j].transpose() * d;
+      }
+
+      d = grad.a[j - 1];
+      for (size_t k = 0; k < H_SIZE; k++)
+        d(k) *= 1 - a[i - 1][j - 1](k) * a[i - 1][j - 1](k);
+    }
+
+    grad.wxy[0] += d * x[i - 1].transpose();
+    grad.b[0] += d;
+  }
+
+  return *mop_div(&grad, (double)batch_size);
+}
+
+void train(model *m, smf::MidiFile *midi, size_t batch_num, size_t sepoch,
            RtMidiOut *midiout) {
 
-  double cost = 0;
-  model *grad = mset_zero(new model);
+  model grad;
+  mset_zero(&grad);
+  double loss = 0, batch_loss = 0;
   smf::MidiFile sample_midi;
   char path[MAX_PATH_LEN] = "";
 
-  for (size_t epoch = 0; epoch < EPOCH_NUM; epoch++) {
+  for (size_t epoch = sepoch; epoch < EPOCH_NUM; epoch++) {
 
     if (epoch != 0 && epoch % EPOCH_SAMPLE_PERIOD == 0) {
-      std::cout << "[*] Generating MIDI sample for epoch " << epoch + 1 << "..."
+
+      std::cout << "[*] Saving model for epoch " << epoch << "..." << std::endl;
+      sprintf(path, "%smodel-%d.json", MODEL_DIR, (int)epoch);
+      msv_save(m, path);
+      std::cout << "[*] Model successfully saved" << std::endl;
+
+      std::cout << "[*] Generating MIDI sample for epoch " << epoch << "..."
                 << std::endl;
       sample_midi = sample(*m, {}, 0);
       std::cout << "[*] MIDI sample successfully generated" << std::endl;
 
+      sprintf(path, "%ssample-%d.mid", SAMPLE_DIR, (int)epoch);
+      sample_midi.write(path);
+      std::cout << "[*] MIDI sample saved to " << path << std::endl;
+
       if (midiout != NULL) {
         std::thread(play_midi, midiout, sample_midi).detach();
-        std::cout << "[*] Now playing: MIDI sample for epoch " << epoch + 1
+        std::cout << "[*] Now playing: MIDI sample for epoch " << epoch
                   << std::endl;
-      } else {
-        strcpy(path, "sample.mid");
-        sample_midi.write(path);
-        std::cout << "[*] MIDI sample saved to " << path << std::endl;
       }
     }
 
     for (size_t batch = 0; batch < batch_num; batch++) {
 
       if (batch != 0 && batch % MINI_BATCH_SIZE == 0) {
-        cost /= MINI_BATCH_SIZE;
 
-        grad_desc(m, grad, cost, MINI_BATCH_SIZE);
-
-        for (size_t i = 0; i < LAYER_NUM + 1; i++) {
-          m->wxy[i] += grad->wxy[i], m->b[i] += grad->b[i];
-          grad->wxy[i].setZero(), grad->b[i].setZero();
-        }
-        for (size_t i = 0; i < LAYER_NUM; i++) {
-          m->waa[i] += grad->waa[i];
-          grad->waa[i].setZero();
-        }
-
-        cost = 0;
+        mop_add(m, *mop_mult(mop_div(&grad, MINI_BATCH_SIZE), -LEARNING_RATE));
 
         std::cout << "[*] Model updated over " << MINI_BATCH_SIZE
-                  << " mini-batches on batch " << batch << std::endl;
+                  << " mini-batches on batch " << batch << ", with loss "
+                  << loss / MINI_BATCH_SIZE << std::endl;
+
+        loss = 0;
       }
 
       if (!midi[batch].status()) {
@@ -402,50 +526,46 @@ void train(model *m, smf::MidiFile *midi, size_t batch_num,
                   << batch + 1 << std::endl;
         continue;
       }
-      cost += loss(*m, midi[batch]);
+
+      mop_add(&grad, grad_desc(*m, midi[batch], &batch_loss));
+      loss += batch_loss;
     }
 
-    cost /= ((batch_num % MINI_BATCH_SIZE) ? batch_num % MINI_BATCH_SIZE
-                                           : MINI_BATCH_SIZE);
-
-    grad_desc(m, grad, cost,
-              (batch_num % MINI_BATCH_SIZE) ? batch_num % MINI_BATCH_SIZE
-                                            : MINI_BATCH_SIZE);
-
-    for (size_t i = 0; i < LAYER_NUM + 1; i++) {
-      m->wxy[i] += grad->wxy[i], m->b[i] += grad->b[i];
-      grad->wxy[i].setZero(), grad->b[i].setZero();
-    }
-    for (size_t i = 0; i < LAYER_NUM; i++) {
-      m->waa[i] += grad->waa[i];
-      grad->waa[i].setZero();
-    }
-
+    mop_add(m, *mop_mult(mop_div(&grad, ((batch_num % MINI_BATCH_SIZE)
+                                             ? batch_num % MINI_BATCH_SIZE
+                                             : MINI_BATCH_SIZE)),
+                         -LEARNING_RATE));
     std::cout << "[*] Model updated over "
               << ((batch_num % MINI_BATCH_SIZE) ? batch_num % MINI_BATCH_SIZE
                                                 : MINI_BATCH_SIZE)
-              << " mini-batches on batch " << batch_num << std::endl;
+              << " mini-batches on batch " << batch_num << ", with loss "
+              << loss / ((batch_num % MINI_BATCH_SIZE)
+                             ? batch_num % MINI_BATCH_SIZE
+                             : MINI_BATCH_SIZE)
+              << std::endl;
 
-    std::cout << "[*] Epoch " << epoch + 1 << "/" << EPOCH_NUM << " : Loss "
-              << cost << std::endl;
+    loss = 0;
 
-    cost = 0;
+    std::cout << "[*] Epoch " << epoch + 1 << "/" << EPOCH_NUM << std::endl;
   }
 
-  std::cout << "[*] Generating MIDI sample for training results..."
+  std::cout << "[*] Saving model for epoch " << EPOCH_NUM << "..." << std::endl;
+  sprintf(path, "%smodel-%d.json", MODEL_DIR, EPOCH_NUM);
+  msv_save(m, path);
+  std::cout << "[*] Model successfully saved" << std::endl;
+
+  std::cout << "[*] Generating MIDI sample for epoch " << EPOCH_NUM << "..."
             << std::endl;
   sample_midi = sample(*m, {}, 0);
   std::cout << "[*] MIDI sample successfully generated" << std::endl;
 
+  sprintf(path, "%ssample-%d.mid", SAMPLE_DIR, EPOCH_NUM);
+  sample_midi.write(path);
+  std::cout << "[*] MIDI sample saved to " << path << std::endl;
+
   if (midiout != NULL) {
     std::thread(play_midi, midiout, sample_midi).join();
-    std::cout << "[*] Now playing: MIDI sample for training results..."
+    std::cout << "[*] Now playing: MIDI sample for epoch " << EPOCH_NUM << "..."
               << std::endl;
-  } else {
-    strcpy(path, "sample.mid");
-    sample_midi.write(path);
-    std::cout << "[*] MIDI sample saved to " << path << std::endl;
   }
-
-  delete grad;
 }
