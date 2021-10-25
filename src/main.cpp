@@ -19,11 +19,11 @@
 #define LAYER_NUM 3
 #define IO_SIZE 4
 #define H_SIZE 10
-#define EPOCH_NUM 50
+#define EPOCH_NUM 500
 #define MINI_BATCH_SIZE 100
 #define EPOCH_SAMPLE_PERIOD 10
-#define SAMPLE_SIZE 50
-#define MAX_BATCH_SIZE 30000
+#define SAMPLE_SIZE 200
+#define MAX_BATCH_SIZE 100000
 #define ACT_FUNC tanh
 #define LEARNING_RATE 0.01
 #define NOTE_ON 0x90
@@ -34,11 +34,11 @@
 #define A_MIN 0x01
 #define A_MAX 0x7f
 #define MAX_PATH_LEN 0xff
-#define MAX_FILE_NUM 5000
+#define MAX_FILE_NUM 200000
 #define DATA_DIR "./data/"
-#define MODEL_DIR "./model/"
-#define SAMPLE_DIR "./sample/"
-#define METADATA_FILE "maestro-v3.0.0.json"
+#define MODEL_DIR "./models/"
+#define SAMPLE_DIR "./samples/"
+#define METADATA_FILE "METADATA"
 #define MIDI_OUT 1
 #define TPQ 960
 #define BPM 120
@@ -88,15 +88,25 @@ int main(int argc, char **argv) {
   std::cout << "[*] Model layers, weights and biases initialised" << std::endl;
 
   sprintf(path, "%s%s", DATA_DIR, METADATA_FILE);
-  nlohmann::json md = nlohmann::json::parse(std::ifstream(path));
-  std::cout << "[*] Metadata parsed from " << path << std::endl;
+  FILE *md = fopen(path, "r");
+  // nlohmann::json md = nlohmann::json::parse(std::ifstream(path));
+  if (md)
+    std::cout << "[*] Metadata parsed from " << path << std::endl;
+  else {
+    std::cerr
+        << "[!] Unable to open metadata file, check if it exists. Exiting..."
+        << std::endl;
+    exit(EXIT_FAILURE);
+  }
 
-  smf::MidiFile midi[MAX_FILE_NUM] = {};
+  smf::MidiFile *midi = new smf::MidiFile[MAX_FILE_NUM];
+  char tmp[MAX_PATH_LEN] = "";
   size_t batch_num = 0;
 
-  for (nlohmann::json::reference midi_data : md["midi_filename"]) {
+  while (fgets(tmp, MAX_PATH_LEN - 1, md)) {
 
-    sprintf(path, "%s%s", DATA_DIR, midi_data.get<std::string>().c_str());
+    sprintf(path, "%s%s", DATA_DIR, tmp);
+    path[strlen(path) - 1] = '\0';
     midi[batch_num].read(path);
 
     if (!midi[batch_num].status()) {
@@ -119,12 +129,12 @@ int main(int argc, char **argv) {
   } catch (RtMidiError &e) {
     std::cerr << "[!] Unable to open MIDI output ports, exiting..."
               << std::endl;
-    exit(0);
+    exit(EXIT_FAILURE);
   }
   if (!midiout->isPortOpen()) {
     std::cerr << "[!] Unable to open MIDI output ports, exiting..."
               << std::endl;
-    exit(0);
+    exit(EXIT_FAILURE);
   }
   std::cout << "[*] Connected to MIDI output port " << MIDI_OUT << std::endl;
 #endif
@@ -135,6 +145,7 @@ int main(int argc, char **argv) {
             << " epochs, quitting..." << std::endl;
 
   delete m;
+  delete[] midi;
   delete midiout;
   return 0;
 }
@@ -287,7 +298,6 @@ Eigen::VectorXd encode(Eigen::VectorXd x) {
 
 Eigen::VectorXd decode(Eigen::VectorXd x) {
 
-  map(x, cap);
   x(0) = (x(0) + 1) * (T_MAX - T_MIN) / 2 + T_MIN;
   x(1) = (x(1) + 1) * (T_MAX - T_MIN) / 2 + T_MIN;
   x(2) = round((x(2) + 1) * (N_MAX - N_MIN) / 2 + N_MIN);
@@ -370,7 +380,7 @@ smf::MidiFile sample(model m, Eigen::VectorXd *seq, int seqsize) {
   for (size_t i = 0; i < SAMPLE_SIZE; i++) {
 
     x = predict(&m, x);
-    n = decode(x);
+    n = decode(map(x, cap));
 
     note[1] = n(2), note[2] = n(3);
     midi.addEvent(1, (int)((atime + n(0)) * TPQ * BPM / 60), note);
