@@ -58,6 +58,7 @@ const string DATA_DIR("./data/");
 const string MODEL_DIR("./model/");
 const string SAMPLE_DIR("./sample/");
 const string METADATA_FILE("METADATA");
+int check0112 = 1;
 
 struct model {
   MatrixXd wxy[LAYER_NUM + 1], waa[LAYER_NUM];
@@ -85,6 +86,7 @@ MidiFile sample(model m, VectorXd *seq, int seqsize);
 model grad_desc(model m, MidiFile *midi, double *loss);
 void train(model *m, MidiFile *midi, size_t batch_size, size_t sepoch,
            RtMidiOut *midiout);
+int DeleteInst(int a);
 
 int main(int argc, char **argv) {
 
@@ -411,34 +413,37 @@ model grad_desc(model m, MidiFile midi, double *loss) {
          << endl;
     return grad;
   }
-
   midi.absoluteTicks();
   midi.joinTracks();
   midi.doTimeAnalysis();
   midi.linkNotePairs();
-
   size_t batch_size = 0;
   VectorXd x[MAX_BATCH_SIZE], y[MAX_BATCH_SIZE], a[MAX_BATCH_SIZE][LAYER_NUM],
       d;
   double ptime = 0;
 
   *loss = 0;
+  check0112 = 1;
+  for (size_t i = 0; i < (size_t)midi[0].size(); i++) {
+    if (midi[0][i].isPatchChange()) {
+      if (DeleteInst(midi[0][i][1]))
+        check0112 = 0;
+      else
+        check0112 = 1;
+    }
 
-  for (size_t i = 0; i < (size_t)midi[0].size(); i++)
-    if (midi[0][i].isNoteOn()) {
+    if (midi[0][i].isNoteOn() && check0112) {
 
       batch_size++;
 
       for (size_t j = 0; j < LAYER_NUM; j++)
         a[batch_size - 1][j] = m.a[j];
-
       x[batch_size - 1].resize(IO_SIZE);
       x[batch_size - 1] << midi[0][i].seconds - ptime,
           midi[0][i].getDurationInSeconds(), midi[0][i][1], midi[0][i][2];
       x[batch_size - 1] = encode(x[batch_size - 1]);
 
       y[batch_size - 1] = predict(&m, x[batch_size - 1]);
-
       if (batch_size > 1)
         for (size_t j = 0; j < IO_SIZE; j++)
           *loss += (x[batch_size - 1](j) - y[batch_size - 2](j)) *
@@ -446,6 +451,7 @@ model grad_desc(model m, MidiFile midi, double *loss) {
 
       ptime = midi[0][i].seconds;
     }
+  }
 
   *loss /= batch_size;
 
@@ -483,7 +489,12 @@ model grad_desc(model m, MidiFile midi, double *loss) {
 
   return *mop_div(&grad, (double)batch_size);
 }
-
+int DeleteInst(int a) {
+  if (79 < a < 128)
+    return 1;
+  else
+    return 0;
+}
 void train(model *m, MidiFile *midi, size_t batch_num, size_t sepoch,
            RtMidiOut *midiout) {
 

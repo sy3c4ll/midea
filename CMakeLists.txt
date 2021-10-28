@@ -5,7 +5,6 @@ set(SRCDIR src)
 set(SRC ${SRCDIR}/midea.cpp)
 set(LIBDIR lib)
 set(LIB eigen json midifile rtmidi)
-set(LIB eigen json midifile)
 
 project(${PROJNM})
 add_executable(${PROJNM} ${SRC})
