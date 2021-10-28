@@ -58,7 +58,6 @@ const string DATA_DIR("./data/");
 const string MODEL_DIR("./model/");
 const string SAMPLE_DIR("./sample/");
 const string METADATA_FILE("METADATA");
-int check0112 = 1;
 
 struct model {
   MatrixXd wxy[LAYER_NUM + 1], waa[LAYER_NUM];
@@ -86,7 +85,6 @@ MidiFile sample(model m, VectorXd *seq, int seqsize);
 model grad_desc(model m, MidiFile *midi, double *loss);
 void train(model *m, MidiFile *midi, size_t batch_size, size_t sepoch,
            RtMidiOut *midiout);
-int DeleteInst(int a);
 
 int main(int argc, char **argv) {
 
@@ -407,6 +405,7 @@ model grad_desc(model m, MidiFile midi, double *loss) {
 
   model grad;
   mset_zero(&grad);
+  int check0112 = 1;
 
   if (!midi.status()) {
     cerr << "[!] Unable to parse MIDI data from arguments, skipping batch..."
@@ -423,16 +422,13 @@ model grad_desc(model m, MidiFile midi, double *loss) {
   double ptime = 0;
 
   *loss = 0;
-  check0112 = 1;
-  for (size_t i = 0; i < (size_t)midi[0].size(); i++) {
-    if (midi[0][i].isPatchChange()) {
-      if (DeleteInst(midi[0][i][1]))
-        check0112 = 0;
-      else
-        check0112 = 1;
-    }
 
-    if (midi[0][i].isNoteOn() && check0112) {
+  for (size_t i = 0; i < (size_t)midi[0].size(); i++) {
+
+    if (midi[0][i].isPatchChange())
+      check0112 = 79 < midi[0][i][1] && midi[0][i][1] < 128;
+
+    if (midi[0][i].isNoteOn() && !check0112) {
 
       batch_size++;
 
@@ -489,12 +485,7 @@ model grad_desc(model m, MidiFile midi, double *loss) {
 
   return *mop_div(&grad, (double)batch_size);
 }
-int DeleteInst(int a) {
-  if (79 < a < 128)
-    return 1;
-  else
-    return 0;
-}
+
 void train(model *m, MidiFile *midi, size_t batch_num, size_t sepoch,
            RtMidiOut *midiout) {
 
