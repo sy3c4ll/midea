@@ -32,11 +32,12 @@ using std::thread;
 using std::to_string;
 using std::vector;
 
+#define ERRFILE NULLDEVICE
 #define LAYER_NUM 3
 #define IO_SIZE 4
 #define H_SIZE 10
 #define EPOCH_NUM 500
-#define MINI_BATCH_SIZE 100
+#define BATCH_SIZE 100
 #define EPOCH_SAMPLE_PERIOD 10
 #define SAMPLE_SIZE 200
 #define MAX_BATCH_SIZE 100000
@@ -54,10 +55,11 @@ using std::vector;
 #define TPQ 960
 #define BPM 120
 
-const string DATA_DIR("./data/");
-const string MODEL_DIR("./model/");
-const string SAMPLE_DIR("./sample/");
-const string METADATA_FILE("METADATA");
+const string CWD = "./";
+const string DATA_DIR = CWD + "data/";
+const string MODEL_DIR = CWD + "model/";
+const string SAMPLE_DIR = CWD + "sample/";
+const string METADATA_FILE = "METADATA";
 
 struct model {
   MatrixXd wxy[LAYER_NUM + 1], waa[LAYER_NUM];
@@ -68,7 +70,7 @@ inline double min(double x, double y) { return x < y ? x : y; }
 inline double max(double x, double y) { return x > y ? x : y; }
 inline double cap(double x) { return min(max(x, -1), 1); }
 
-MatrixXd map(MatrixXd M, void *func);
+MatrixXd map(MatrixXd M, double (*fn)(double));
 model *mset_zero(model *x);
 model *mset_random(model *x);
 model *mop_add(model *x, model y);
@@ -82,17 +84,19 @@ VectorXd encode(VectorXd x);
 VectorXd decode(VectorXd x);
 void play_midi(RtMidiOut *midiout, MidiFile midi);
 MidiFile sample(model m, VectorXd *seq, int seqsize);
-model grad_desc(model m, MidiFile *midi, double *loss);
-void train(model *m, MidiFile *midi, size_t batch_size, size_t sepoch,
-           RtMidiOut *midiout);
+model grad_desc(model m, MidiFile midi, double *loss);
+double train(model *m, string *spath, string *epath);
 
 int main(int argc, char **argv) {
 
 #ifdef LOGFILE
-  cout << "[*] LOGFILE defined, redirecting output to " << LOGFILE << endl;
+  cout << "[*] LOGFILE defined, redirecting stdout to " << LOGFILE << endl;
   freopen(LOGFILE, "w", stdout);
-  freopen(LOGFILE, "w", stderr);
 #endif /* LOGFILE */
+#ifdef ERRFILE
+  cout << "[*] ERRFILE defined, redirecting stderr to " << ERRFILE << endl;
+  freopen(ERRFILE, "w", stderr);
+#endif /* ERRFILE */
 
   model *m = mset_random(new model);
   // msv_load(m, MODEL_DIR+"model-"+argv[1]+".json");
@@ -103,28 +107,19 @@ int main(int argc, char **argv) {
   if (md.is_open())
     cout << "[*] Metadata parsed from " << DATA_DIR + METADATA_FILE << endl;
   else {
-    cerr << "[!] Unable to open metadata file, check if it exists. Exiting..."
-         << endl;
+    cerr << "[!] Unable to open metadata file, check if "
+         << DATA_DIR + METADATA_FILE << " exists. Aborting..." << endl;
     exit(EXIT_FAILURE);
   }
 
-  MidiFile *midi = new MidiFile[MAX_FILE_NUM];
-  string path("");
+  string path[MAX_FILE_NUM] = {};
   size_t batch_num = 0;
 
-  while (getline(md, path)) {
-
-    path = DATA_DIR + path;
-    midi[batch_num].read(path);
-
-    if (!midi[batch_num].status()) {
-      cerr << "[!] Unable to open MIDI file from path " << path << endl;
-      continue;
-    }
-
+  while (getline(md, path[batch_num])) {
+    path[batch_num] = DATA_DIR + path[batch_num];
     batch_num++;
   }
-  cout << "[*] " << batch_num << " MIDI files successfully loaded" << endl;
+  cout << "[*] " << batch_num << " MIDI file paths found" << endl;
 
   RtMidiOut *midiout = NULL;
 
@@ -133,24 +128,78 @@ int main(int argc, char **argv) {
     midiout = new RtMidiOut();
     midiout->openPort(MIDI_OUT);
   } catch (RtMidiError &e) {
-    cerr << "[!] Unable to open MIDI output ports, exiting..." << endl;
+    cerr << "[!] Unable to open MIDI output ports, aborting..." << endl;
     exit(EXIT_FAILURE);
   }
   if (!midiout->isPortOpen()) {
-    cerr << "[!] Unable to open MIDI output ports, exiting..." << endl;
+    cerr << "[!] Unable to open MIDI output ports, aborting..." << endl;
     exit(EXIT_FAILURE);
   }
   cout << "[*] Connected to MIDI output port " << MIDI_OUT << endl;
-#endif
+#endif /* MIDI_OUT */
 
-  train(m, midi, batch_num, (size_t)atoi(argv[1]), midiout);
+  double loss = 0;
+  MidiFile sample_midi;
+
+  for (size_t epoch = (size_t)atoi(argv[1]); epoch < EPOCH_NUM; epoch++) {
+
+    if (epoch != 0 && epoch % EPOCH_SAMPLE_PERIOD == 0) {
+
+      cout << "[*] Saving model for epoch " << epoch << "..." << endl;
+      msv_save(m, MODEL_DIR + "model-" + to_string(epoch) + ".json");
+      cout << "[*] Model successfully saved" << endl;
+
+      cout << "[*] Generating MIDI sample for epoch " << epoch << "..." << endl;
+      sample_midi = sample(*m, {}, 0);
+      cout << "[*] MIDI sample successfully generated" << endl;
+
+      sample_midi.write(SAMPLE_DIR + "sample-" + to_string(epoch) + ".mid");
+      cout << "[*] MIDI sample saved to " << SAMPLE_DIR << "sample-" << epoch
+           << ".mid" << endl;
+
+      if (midiout != NULL) {
+        thread(play_midi, midiout, sample_midi).detach();
+        cout << "[*] Now playing: MIDI sample for epoch " << epoch << endl;
+      }
+    }
+
+    for (size_t loc = 0; loc + BATCH_SIZE < batch_num; loc += BATCH_SIZE) {
+      loss = train(m, path + loc, path + loc + BATCH_SIZE);
+      cout << "[" << epoch + 1 << "/" << EPOCH_NUM
+           << "] Model trained from batch " << loc << "-" << loc + BATCH_SIZE
+           << "/" << batch_num << " with loss " << loss << endl;
+    }
+    loss = train(m, path + (batch_num / BATCH_SIZE) * BATCH_SIZE,
+                 path + batch_num);
+    cout << "[" << epoch + 1 << "/" << EPOCH_NUM
+         << "] Model trained from batch "
+         << (batch_num / BATCH_SIZE) * BATCH_SIZE << "-" << batch_num << "/"
+         << batch_num << " with loss " << loss << endl;
+  }
+
+  cout << "[*] Saving model for epoch " << EPOCH_NUM << "..." << endl;
+  msv_save(m, MODEL_DIR + "model-" + to_string(EPOCH_NUM) + ".json");
+  cout << "[*] Model successfully saved" << endl;
+
+  cout << "[*] Generating MIDI sample for epoch " << EPOCH_NUM << "..." << endl;
+  sample_midi = sample(*m, {}, 0);
+  cout << "[*] MIDI sample successfully generated" << endl;
+
+  sample_midi.write(SAMPLE_DIR + "sample-" + to_string(EPOCH_NUM) + ".mid");
+  cout << "[*] MIDI sample saved to " << SAMPLE_DIR << "sample-" << EPOCH_NUM
+       << ".mid" << endl;
+
+  if (midiout != NULL) {
+    thread(play_midi, midiout, sample_midi).join();
+    cout << "[*] Now playing: MIDI sample for epoch " << EPOCH_NUM << "..."
+         << endl;
+  }
 
   cout << "[*] Model successfully trained over " << EPOCH_NUM
-       << " epochs, quitting..." << endl;
+       << " epochs, exiting..." << endl;
 
   delete m;
   delete midiout;
-  delete[] midi;
   return 0;
 }
 
@@ -312,7 +361,7 @@ VectorXd decode(VectorXd x) {
 void play_midi(RtMidiOut *midiout, MidiFile midi) {
 
   if (!midi.status()) {
-    cerr << "[!] train: Unable to process MIDI data from arguments" << endl;
+    cerr << "[!] play_midi: Unable to process MIDI data from arguments" << endl;
     return;
   }
 
@@ -353,7 +402,7 @@ MidiFile sample(model m, VectorXd *seq, int seqsize) {
       midi.addEvent(1, (int)((atime + seq[i](0) + seq[i](1)) * TPQ * BPM / 60),
                     note);
 
-      cout << "[*] generate: Recorded pre-entered note " << (int)seq[i](2)
+      cout << "[*] sample: Recorded pre-entered note " << (int)seq[i](2)
            << " of attack " << (int)seq[i](3) << " ON to " << atime + seq[i](0)
            << " and OFF to " << atime + seq[i](0) + seq[i](1) << endl;
 
@@ -372,7 +421,7 @@ MidiFile sample(model m, VectorXd *seq, int seqsize) {
     note[2] = 0;
     midi.addEvent(1, (int)((atime + x(0) + x(1)) * TPQ * BPM / 60), note);
 
-    cout << "[*] generate: Recorded pre-entered note " << (int)x(2)
+    cout << "[*] sample: Recorded pre-entered note " << (int)x(2)
          << " of attack " << (int)x(3) << " ON to " << atime + x(0)
          << " and OFF to " << atime + x(0) + x(1) << endl;
 
@@ -390,9 +439,9 @@ MidiFile sample(model m, VectorXd *seq, int seqsize) {
     note[2] = 0;
     midi.addEvent(1, (int)((atime + n(0) + n(1)) * TPQ * BPM / 60), note);
 
-    cout << "[*] generate: Recorded generated note " << (int)n(2)
-         << " of attack " << (int)n(3) << " ON to " << atime + n(0)
-         << " and OFF to " << atime + n(0) + n(1) << endl;
+    cout << "[*] sample: Recorded generated note " << (int)n(2) << " of attack "
+         << (int)n(3) << " ON to " << atime + n(0) << " and OFF to "
+         << atime + n(0) + n(1) << endl;
 
     atime += n(0);
   }
@@ -407,8 +456,8 @@ model grad_desc(model m, MidiFile midi, double *loss) {
   mset_zero(&grad);
 
   if (!midi.status()) {
-    cerr << "[!] Unable to parse MIDI data from arguments, skipping batch..."
-         << endl;
+    cerr << "[!] Unable to parse MIDI data from argument, skipping..." << endl;
+    *loss = 0;
     return grad;
   }
 
@@ -418,36 +467,41 @@ model grad_desc(model m, MidiFile midi, double *loss) {
   midi.linkNotePairs();
 
   size_t batch_size = 0;
-  VectorXd x[MAX_BATCH_SIZE], y[MAX_BATCH_SIZE], a[MAX_BATCH_SIZE][LAYER_NUM],
-      d;
+  VectorXd *x = new VectorXd[MAX_BATCH_SIZE], *y = new VectorXd[MAX_BATCH_SIZE],
+           *a[LAYER_NUM], d;
+  for (size_t i = 0; i < LAYER_NUM; i++)
+    a[i] = new VectorXd[MAX_BATCH_SIZE];
   double ptime = 0;
-
   *loss = 0;
 
   for (size_t i = 0; i < (size_t)midi[0].size(); i++)
     if (midi[0][i].isNoteOn()) {
 
-      batch_size++;
-
       for (size_t j = 0; j < LAYER_NUM; j++)
-        a[batch_size - 1][j] = m.a[j];
+        a[j][batch_size] = m.a[j];
 
-      x[batch_size - 1].resize(IO_SIZE);
-      x[batch_size - 1] << midi[0][i].seconds - ptime,
+      x[batch_size].resize(IO_SIZE);
+      x[batch_size] << midi[0][i].seconds - ptime,
           midi[0][i].getDurationInSeconds(), midi[0][i][1], midi[0][i][2];
-      x[batch_size - 1] = encode(x[batch_size - 1]);
+      x[batch_size] = encode(x[batch_size]);
 
-      y[batch_size - 1] = predict(&m, x[batch_size - 1]);
+      y[batch_size] = predict(&m, x[batch_size]);
 
-      if (batch_size > 1)
+      if (batch_size > 0)
         for (size_t j = 0; j < IO_SIZE; j++)
-          *loss += (x[batch_size - 1](j) - y[batch_size - 2](j)) *
-                   (x[batch_size - 1](j) - y[batch_size - 2](j)) / IO_SIZE;
+          *loss += (x[batch_size](j) - y[batch_size - 1](j)) *
+                   (x[batch_size](j) - y[batch_size - 1](j)) / IO_SIZE;
 
       ptime = midi[0][i].seconds;
+
+      batch_size++;
     }
 
-  *loss /= batch_size;
+  if (batch_size == 0) {
+    *loss = 0;
+    return grad;
+  } else
+    *loss /= batch_size;
 
   for (size_t i = batch_size; i > 0; i--) {
 
@@ -461,115 +515,60 @@ model grad_desc(model m, MidiFile midi, double *loss) {
 
       if (i < batch_size) {
         for (size_t k = 0; k < H_SIZE; k++)
-          grad.a[j - 1](k) *= 1 - a[i][j - 1](k) * a[i][j - 1](k);
-        grad.waa[j - 1] = grad.a[j - 1] * a[i - 1][j - 1].transpose();
+          grad.a[j - 1](k) *= 1 - a[j - 1][i](k) * a[j - 1][i](k);
+        grad.waa[j - 1] = grad.a[j - 1] * a[j - 1][i - 1].transpose();
         grad.a[j - 1] = m.waa[j - 1].transpose() * grad.a[j - 1];
       }
 
       if (i > 1) {
-        grad.wxy[j] += d * a[i - 1][j - 1].transpose();
+        grad.wxy[j] += d * a[j - 1][i - 1].transpose();
         grad.b[j] += d;
         grad.a[j - 1] += m.wxy[j].transpose() * d;
       }
 
       d = grad.a[j - 1];
       for (size_t k = 0; k < H_SIZE; k++)
-        d(k) *= 1 - a[i - 1][j - 1](k) * a[i - 1][j - 1](k);
+        d(k) *= 1 - a[j - 1][i - 1](k) * a[j - 1][i - 1](k);
     }
 
     grad.wxy[0] += d * x[i - 1].transpose();
     grad.b[0] += d;
   }
 
+  delete[] x;
+  delete[] y;
+  for (size_t i = 0; i < LAYER_NUM; i++)
+    delete[] a[i];
+
   return *mop_div(&grad, (double)batch_size);
 }
 
-void train(model *m, MidiFile *midi, size_t batch_num, size_t sepoch,
-           RtMidiOut *midiout) {
+double train(model *m, string *spath, string *epath) {
 
   model grad;
   mset_zero(&grad);
+  MidiFile midi;
+  size_t batch_num = 0;
   double loss = 0, batch_loss = 0;
-  MidiFile sample_midi;
 
-  for (size_t epoch = sepoch; epoch < EPOCH_NUM; epoch++) {
+  for (string *path = spath; path < epath; path++)
+    if (*path != "") {
 
-    if (epoch != 0 && epoch % EPOCH_SAMPLE_PERIOD == 0) {
+      midi.read(*path);
 
-      cout << "[*] Saving model for epoch " << epoch << "..." << endl;
-      msv_save(m, MODEL_DIR + "model-" + to_string(epoch) + ".json");
-      cout << "[*] Model successfully saved" << endl;
-
-      cout << "[*] Generating MIDI sample for epoch " << epoch << "..." << endl;
-      sample_midi = sample(*m, {}, 0);
-      cout << "[*] MIDI sample successfully generated" << endl;
-
-      sample_midi.write(SAMPLE_DIR + "sample-" + to_string(epoch) + ".mid");
-      cout << "[*] MIDI sample saved to " << SAMPLE_DIR << "sample-" << epoch
-           << ".mid" << endl;
-
-      if (midiout != NULL) {
-        thread(play_midi, midiout, sample_midi).detach();
-        cout << "[*] Now playing: MIDI sample for epoch " << epoch << endl;
-      }
-    }
-
-    for (size_t batch = 0; batch < batch_num; batch++) {
-
-      if (batch != 0 && batch % MINI_BATCH_SIZE == 0) {
-
-        mop_add(m, *mop_mult(mop_div(&grad, MINI_BATCH_SIZE), -LEARNING_RATE));
-
-        cout << "[*] Model updated over " << MINI_BATCH_SIZE
-             << " mini-batches on batch " << batch << ", with loss "
-             << loss / MINI_BATCH_SIZE << endl;
-
-        loss = 0;
-      }
-
-      if (!midi[batch].status()) {
-        cerr << "[!] train: Unable to parse MIDI data from arguments, "
-                "skipping: batch "
-             << batch + 1 << endl;
+      if (!midi.status()) {
+        cerr << "[!] Invalid MIDI data, " << *path
+             << " will be excluded from training" << endl;
+        *path = "";
         continue;
       }
 
-      mop_add(&grad, grad_desc(*m, midi[batch], &batch_loss));
+      mop_add(&grad, grad_desc(*m, midi, &batch_loss));
       loss += batch_loss;
+      batch_num++;
     }
 
-    mop_add(m, *mop_mult(mop_div(&grad, ((batch_num % MINI_BATCH_SIZE)
-                                             ? batch_num % MINI_BATCH_SIZE
-                                             : MINI_BATCH_SIZE)),
-                         -LEARNING_RATE));
-    cout << "[*] Model updated over "
-         << ((batch_num % MINI_BATCH_SIZE) ? batch_num % MINI_BATCH_SIZE
-                                           : MINI_BATCH_SIZE)
-         << " mini-batches on batch " << batch_num << ", with loss "
-         << loss / ((batch_num % MINI_BATCH_SIZE) ? batch_num % MINI_BATCH_SIZE
-                                                  : MINI_BATCH_SIZE)
-         << ::endl;
+  mop_add(m, *mop_mult(mop_div(&grad, batch_num), -LEARNING_RATE));
 
-    loss = 0;
-
-    cout << "[*] Epoch " << epoch + 1 << "/" << EPOCH_NUM << endl;
-  }
-
-  cout << "[*] Saving model for epoch " << EPOCH_NUM << "..." << endl;
-  msv_save(m, MODEL_DIR + "model-" + to_string(EPOCH_NUM) + ".json");
-  cout << "[*] Model successfully saved" << endl;
-
-  cout << "[*] Generating MIDI sample for epoch " << EPOCH_NUM << "..." << endl;
-  sample_midi = sample(*m, {}, 0);
-  cout << "[*] MIDI sample successfully generated" << endl;
-
-  sample_midi.write(SAMPLE_DIR + "sample-" + to_string(EPOCH_NUM) + ".mid");
-  cout << "[*] MIDI sample saved to " << SAMPLE_DIR << "sample-" << EPOCH_NUM
-       << ".mid" << endl;
-
-  if (midiout != NULL) {
-    thread(play_midi, midiout, sample_midi).join();
-    cout << "[*] Now playing: MIDI sample for epoch " << EPOCH_NUM << "..."
-         << endl;
-  }
+  return loss / batch_num;
 }
