@@ -2,10 +2,13 @@
 #include "midifile/MidiFile.h"
 #include "rtmidi/RtMidi.h"
 #include "json/json.hpp"
+#include <ctime>
+#include <functional>
 #include <future>
 #include <iomanip>
 #include <iostream>
 #include <mutex>
+#include <random>
 #include <string>
 #include <thread>
 
@@ -31,12 +34,14 @@ using std::future_status;
 using std::getline;
 using std::ifstream;
 using std::move;
+using std::mt19937;
 using std::mutex;
 using std::ofstream;
 using std::setw;
 using std::string;
 using std::thread;
 using std::to_string;
+using std::uniform_real_distribution;
 using std::vector;
 using std::chrono::duration;
 
@@ -54,11 +59,21 @@ using std::chrono::duration;
 #define LEARNING_RATE 0.01
 #define NOTE_ON 0x90
 #define T_MIN 0
+#define T_MIN_SAMPLE 0
 #define T_MAX 3
+#define T_MAX_SAMPLE 3
 #define N_MIN 0x00
+#define N_MIN_SAMPLE 0x00
 #define N_MAX 0x7f
+#define N_MAX_SAMPLE 0x7f
 #define A_MIN 0x01
+#define A_MIN_SAMPLE 0x01
 #define A_MAX 0x7f
+#define A_MAX_SAMPLE 0x7f
+#define RAND_CIRCLE 50
+#define N_SAMP 10
+#define A_SAMP 20
+
 #define MAX_FILE_NUM 200000
 #define MIDI_OUT 1
 #define TPQ 960
@@ -439,7 +454,8 @@ MidiFile sample(model m, VectorXd *seq, int seqsize) {
   vector<uint8_t> note{NOTE_ON, 0, 0};
   VectorXd x(IO_SIZE), n(IO_SIZE);
   double atime = 0;
-
+  int temp = 0;
+  float randtemp = 0;
   midi.absoluteTicks();
   midi.setTPQ(TPQ);
   midi.addTrack(1);
@@ -480,10 +496,38 @@ MidiFile sample(model m, VectorXd *seq, int seqsize) {
 
     atime += x(0);
   }
-
   for (size_t i = 0; i < SAMPLE_SIZE; i++) {
+    mt19937 engine((float)time(NULL));
+    uniform_real_distribution<float> distribution(0, 1000);
+    auto isrand = bind(distribution, engine);
+    if (!int(isrand()) % RAND_CIRCLE) {
+      randtemp = isrand();
+      x(0) = int(randtemp) % (T_MAX - T_MIN) + randtemp - int(randtemp);
+      randtemp = isrand();
+      x(1) = int(randtemp) % (T_MAX - T_MIN) + randtemp - int(randtemp);
+      x(2) = x(2) + N_SAMP - int(isrand()) % (2 * N_SAMP + 1);
+      x(3) = x(3) + A_SAMP - int(isrand()) % (2 * A_SAMP + 1);
 
-    x = predict(&m, x);
+      x(0) = max(T_MIN_SAMPLE, x(0));
+      x(0) = min(T_MAX_SAMPLE, x(0));
+      x(1) = max(T_MIN_SAMPLE, x(1));
+      x(1) = min(T_MAX_SAMPLE, x(1));
+      x(2) = max(N_MIN_SAMPLE, x(2));
+      x(2) = min(N_MAX_SAMPLE, x(2));
+      x(3) = max(A_MIN_SAMPLE, x(3));
+      x(3) = min(A_MAX_SAMPLE, x(3));
+    } else {
+      x = predict(&m, x);
+
+      x(0) = max(T_MIN_SAMPLE, x(0));
+      x(0) = min(T_MAX_SAMPLE, x(0));
+      x(1) = max(T_MIN_SAMPLE, x(1));
+      x(1) = min(T_MAX_SAMPLE, x(1));
+      x(2) = max(N_MIN_SAMPLE, x(2));
+      x(2) = min(N_MAX_SAMPLE, x(2));
+      x(3) = max(A_MIN_SAMPLE, x(3));
+      x(3) = min(A_MAX_SAMPLE, x(3));
+    }
     n = decode(map(x, cap));
 
     note[1] = n(2), note[2] = n(3);
@@ -507,18 +551,17 @@ model grad_desc(model m, MidiFile midi, double *loss) {
 
   model grad;
   mset_zero(&grad);
+  int check0112 = 1;
 
   if (!midi.status()) {
     cerr << "[!] Unable to parse MIDI data from argument, skipping..." << endl;
     *loss = 0;
     return grad;
   }
-
   midi.absoluteTicks();
   midi.joinTracks();
   midi.doTimeAnalysis();
   midi.linkNotePairs();
-
   size_t batch_size = 0;
   VectorXd *x = new VectorXd[MAX_BATCH_SIZE], *y = new VectorXd[MAX_BATCH_SIZE],
            *a[LAYER_NUM] = {}, d;
@@ -527,20 +570,35 @@ model grad_desc(model m, MidiFile midi, double *loss) {
   double ptime = 0;
   *loss = 0;
 
-  for (size_t i = 0; i < (size_t)midi[0].size(); i++)
-    if (midi[0][i].isNoteOn()) {
+  for (size_t i = 0; i < (size_t)midi[0].size(); i++) {
+
+    if (midi[0][i].isPatchChange())
+      check0112 = 79 < midi[0][i][1] && midi[0][i][1] < 128;
+
+    if (midi[0][i].isNoteOn() && !check0112) {
 
       for (size_t j = 0; j < LAYER_NUM; j++)
+<<<<<<< HEAD
         a[j][batch_size] = m.a[j];
 
       x[batch_size].resize(IO_SIZE);
       x[batch_size] << midi[0][i].seconds - ptime,
+=======
+        a[batch_size - 1][j] = m.a[j];
+      x[batch_size - 1].resize(IO_SIZE);
+      x[batch_size - 1] << midi[0][i].seconds - ptime,
+>>>>>>> github0112
           midi[0][i].getDurationInSeconds(), midi[0][i][1], midi[0][i][2];
       x[batch_size] = encode(x[batch_size]);
 
+<<<<<<< HEAD
       y[batch_size] = predict(&m, x[batch_size]);
 
       if (batch_size > 0)
+=======
+      y[batch_size - 1] = predict(&m, x[batch_size - 1]);
+      if (batch_size > 1)
+>>>>>>> github0112
         for (size_t j = 0; j < IO_SIZE; j++)
           *loss += (x[batch_size](j) - y[batch_size - 1](j)) *
                    (x[batch_size](j) - y[batch_size - 1](j)) / IO_SIZE;
@@ -549,6 +607,7 @@ model grad_desc(model m, MidiFile midi, double *loss) {
 
       batch_size++;
     }
+  }
 
   if (batch_size == 0) {
     *loss = 0;
