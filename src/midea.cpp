@@ -2,13 +2,9 @@
 #include "midifile/MidiFile.h"
 #include "rtmidi/RtMidi.h"
 #include "json/json.hpp"
-#include <ctime>
-#include <functional>
 #include <future>
 #include <iomanip>
 #include <iostream>
-#include <mutex>
-#include <random>
 #include <string>
 #include <thread>
 
@@ -34,51 +30,49 @@ using std::future_status;
 using std::getline;
 using std::ifstream;
 using std::move;
-using std::mt19937;
 using std::mutex;
 using std::ofstream;
 using std::setw;
 using std::string;
 using std::thread;
 using std::to_string;
-using std::uniform_real_distribution;
 using std::vector;
 using std::chrono::duration;
 
-#define ERRFILE NULLDEVICE
+#define LOGFILE "log.txt"
+#define ERRFILE "log.txt"
 #define LAYER_NUM 3
 #define IO_SIZE 4
 #define H_SIZE 10
-#define EPOCH_NUM 100
-#define PRL 12
+#define EPOCH_NUM 10000
+#define PRL 8
 #define BATCH_SIZE 100
 #define EPOCH_SAMPLE_PERIOD 1
-#define SAMPLE_SIZE 200
+#define SAMPLE_SIZE 1000
 #define MAX_BATCH_SIZE 100000
 #define ACT_FUNC tanh
 #define LEARNING_RATE 0.01
 #define NOTE_ON 0x90
-#define T_MIN 0
-#define T_MIN_SAMPLE 0
-#define T_MAX 3
-#define T_MAX_SAMPLE 3
-#define N_MIN 0x00
-#define N_MIN_SAMPLE 0x00
-#define N_MAX 0x7f
-#define N_MAX_SAMPLE 0x7f
-#define A_MIN 0x01
-#define A_MIN_SAMPLE 0x01
-#define A_MAX 0x7f
-#define A_MAX_SAMPLE 0x7f
-#define RAND_CIRCLE 50
-#define N_SAMP 10
-#define A_SAMP 20
-
+#define T_MIN_HARD 0
+#define T_MAX_HARD 3
+#define N_MIN_HARD 0x00
+#define N_MAX_HARD 0x7f
+#define A_MIN_HARD 0x01
+#define A_MAX_HARD 0x7f
+#define T_MIN_SOFT 0
+#define T_MAX_SOFT 3
+#define N_MIN_SOFT 0x00
+#define N_MAX_SOFT 0x7f
+#define A_MIN_SOFT 0x20
+#define A_MAX_SOFT 0x7f
+#define RAND_NOTE_PERIOD 50
 #define MAX_FILE_NUM 200000
 #define MIDI_OUT 1
 #define TPQ 960
 #define BPM 120
-#define dbg cout << __LINE__ << endl;
+
+#define min(a,b) ((a)<(b)?(a):(b))
+#define max(a,b) ((a)>(b)?(a):(b))
 
 const string CWD = "./";
 const string DATA_DIR = CWD + "data/";
@@ -90,10 +84,6 @@ struct model {
   MatrixXd wxy[LAYER_NUM + 1], waa[LAYER_NUM];
   VectorXd b[LAYER_NUM + 1], a[LAYER_NUM];
 };
-
-inline double min(double x, double y) { return x < y ? x : y; }
-inline double max(double x, double y) { return x > y ? x : y; }
-inline double cap(double x) { return min(max(x, -1), 1); }
 
 MatrixXd map(MatrixXd M, double (*fn)(double));
 model *mset_zero(model *x);
@@ -108,7 +98,7 @@ VectorXd predict(model *m, VectorXd x);
 VectorXd encode(VectorXd x);
 VectorXd decode(VectorXd x);
 void play_midi(RtMidiOut *midiout, MidiFile midi);
-MidiFile sample(model m, VectorXd *seq, int seqsize);
+MidiFile sample(model m, bool rand);
 model grad_desc(model m, MidiFile midi, double *loss);
 double train(model *m, string *spath, string *epath, mutex *lock);
 
@@ -172,24 +162,32 @@ int main(int argc, char **argv) {
   for (size_t epoch = argc == 2 ? (size_t)atoi(argv[1]) : 0; epoch < EPOCH_NUM;
        epoch++) {
 
-    if (epoch != 0 && epoch % EPOCH_SAMPLE_PERIOD == 0) {
+    if (epoch % EPOCH_SAMPLE_PERIOD == 0) {
 
       msv_save(m, MODEL_DIR + "model-" + to_string(epoch) + ".json");
       cout << "[" << epoch << "/" << EPOCH_NUM << "] Model saved to "
            << MODEL_DIR << "model-" << epoch << ".json" << endl;
 
-      sample_midi = sample(*m, {}, 0);
-      cout << "[" << epoch << "/" << EPOCH_NUM << "] MIDI sample generated"
+      sample_midi = sample(*m, false);
+      cout << "[" << epoch << "/" << EPOCH_NUM << "] MIDI sample generated with 'normal' strategy"
            << endl;
 
-      sample_midi.write(SAMPLE_DIR + "sample-" + to_string(epoch) + ".mid");
+      sample_midi.write(SAMPLE_DIR + "sample_norm_" + to_string(epoch) + ".mid");
       cout << "[" << epoch << "/" << EPOCH_NUM << "] MIDI sample saved to "
-           << SAMPLE_DIR << "sample-" << epoch << ".mid" << endl;
+           << SAMPLE_DIR << "sample_norm_" << epoch << ".mid" << endl;
+
+      sample_midi = sample(*m, true);
+      cout << "[" << epoch << "/" << EPOCH_NUM << "] MIDI sample generated with 'random' strategy"
+           << endl;
+
+      sample_midi.write(SAMPLE_DIR + "sample_rand_" + to_string(epoch) + ".mid");
+      cout << "[" << epoch << "/" << EPOCH_NUM << "] MIDI sample saved to "
+           << SAMPLE_DIR << "sample_rand_" << epoch << ".mid" << endl;
 
       if (midiout != NULL) {
         player = thread(play_midi, midiout, sample_midi);
         player.detach();
-        cout << "[" << epoch << "/" << EPOCH_NUM << "] Now playing: sample 1"
+        cout << "[" << epoch << "/" << EPOCH_NUM << "] Now playing: sample_rand_"<<epoch
              << endl;
       }
     }
@@ -209,10 +207,6 @@ int main(int argc, char **argv) {
           ref[thr][1] = loc;
           ref[thr][2] = loc + BATCH_SIZE;
 
-          cout << "[" << ref[thr][0] << "/" << EPOCH_NUM
-               << "] Training model with batch " << ref[thr][1] << "-"
-               << ref[thr][2] - 1 << "/" << batch_num << " on thread " << thr
-               << endl;
           loss[thr] =
               async(train, m, path + ref[thr][1], path + ref[thr][2], &lock);
 
@@ -233,10 +227,6 @@ int main(int argc, char **argv) {
         ref[thr][1] = batch_num - (batch_num % BATCH_SIZE);
         ref[thr][2] = batch_num;
 
-        cout << "[" << ref[thr][0] << "/" << EPOCH_NUM
-             << "] Training model with batch " << ref[thr][1] << "-"
-             << ref[thr][2] - 1 << "/" << batch_num << " on thread " << thr
-             << endl;
         loss[thr] =
             async(train, m, path + ref[thr][1], path + ref[thr][2], &lock);
 
@@ -248,13 +238,21 @@ int main(int argc, char **argv) {
   cout << "[" << EPOCH_NUM << "/" << EPOCH_NUM << "] Model saved to "
        << MODEL_DIR << "model-" << EPOCH_NUM << ".json" << endl;
 
-  sample_midi = sample(*m, {}, 0);
-  cout << "[" << EPOCH_NUM << "/" << EPOCH_NUM << "] MIDI sample generated"
+  sample_midi = sample(*m, false);
+  cout << "[" << EPOCH_NUM << "/" << EPOCH_NUM << "] MIDI sample generated with 'normal' strategy"
        << endl;
 
-  sample_midi.write(SAMPLE_DIR + "sample-" + to_string(EPOCH_NUM) + ".mid");
+  sample_midi.write(SAMPLE_DIR + "sample_norm_" + to_string(EPOCH_NUM) + ".mid");
   cout << "[" << EPOCH_NUM << "/" << EPOCH_NUM << "] MIDI sample saved to "
-       << SAMPLE_DIR << "sample-" << EPOCH_NUM << ".mid" << endl;
+       << SAMPLE_DIR << "sample_norm_" << EPOCH_NUM << ".mid" << endl;
+
+  sample_midi = sample(*m, true);
+  cout << "[" << EPOCH_NUM << "/" << EPOCH_NUM << "] MIDI sample generated with 'random' strategy"
+       << endl;
+
+  sample_midi.write(SAMPLE_DIR + "sample_rand_" + to_string(EPOCH_NUM) + ".mid");
+  cout << "[" << EPOCH_NUM << "/" << EPOCH_NUM << "] MIDI sample saved to "
+       << SAMPLE_DIR << "sample_rand_" << EPOCH_NUM << ".mid" << endl;
 
   if (midiout != NULL) {
     player = thread(play_midi, midiout, sample_midi);
@@ -268,7 +266,7 @@ int main(int argc, char **argv) {
 
   delete m;
   delete midiout;
-  return 0;
+  return EXIT_SUCCESS;
 }
 
 MatrixXd map(MatrixXd M, double (*fn)(double)) {
@@ -410,19 +408,19 @@ VectorXd predict(model *m, VectorXd x) {
 
 VectorXd encode(VectorXd x) {
 
-  x(0) = (x(0) - T_MIN) / (T_MAX - T_MIN) * 2 - 1;
-  x(1) = (x(1) - T_MIN) / (T_MAX - T_MIN) * 2 - 1;
-  x(2) = (x(2) - N_MIN) / (N_MAX - N_MIN) * 2 - 1;
-  x(3) = (x(3) - A_MIN) / (A_MAX - A_MIN) * 2 - 1;
+  x(0) = (x(0) - T_MIN_HARD) / (T_MAX_HARD - T_MIN_HARD) * 2 - 1;
+  x(1) = (x(1) - T_MIN_HARD) / (T_MAX_HARD - T_MIN_HARD) * 2 - 1;
+  x(2) = (x(2) - N_MIN_HARD) / (N_MAX_HARD - N_MIN_HARD) * 2 - 1;
+  x(3) = (x(3) - A_MIN_HARD) / (A_MAX_HARD - A_MIN_HARD) * 2 - 1;
   return x;
 }
 
 VectorXd decode(VectorXd x) {
 
-  x(0) = (x(0) + 1) * (T_MAX - T_MIN) / 2 + T_MIN;
-  x(1) = (x(1) + 1) * (T_MAX - T_MIN) / 2 + T_MIN;
-  x(2) = round((x(2) + 1) * (N_MAX - N_MIN) / 2 + N_MIN);
-  x(3) = round((x(3) + 1) * (A_MAX - A_MIN) / 2 + A_MIN);
+  x(0) = min(max((x(0) + 1) * (T_MAX_HARD - T_MIN_HARD) / 2 + T_MIN_HARD,T_MIN_SOFT),T_MAX_SOFT);
+  x(1) = min(max((x(1) + 1) * (T_MAX_HARD - T_MIN_HARD) / 2 + T_MIN_HARD,T_MIN_SOFT),T_MAX_SOFT);
+  x(2) = round(min(max((x(2) + 1) * (N_MAX_HARD - N_MIN_HARD) / 2 + N_MIN_HARD,N_MIN_SOFT),N_MAX_SOFT));
+  x(3) = round(min(max((x(3) + 1) * (A_MAX_HARD - A_MIN_HARD) / 2 + A_MIN_HARD,A_MIN_SOFT),A_MAX_SOFT));
   return x;
 }
 
@@ -448,7 +446,7 @@ void play_midi(RtMidiOut *midiout, MidiFile midi) {
   return;
 }
 
-MidiFile sample(model m, VectorXd *seq, int seqsize) {
+MidiFile sample(model m, bool rand) {
 
   MidiFile midi;
   vector<uint8_t> note{NOTE_ON, 0, 0};
@@ -460,75 +458,13 @@ MidiFile sample(model m, VectorXd *seq, int seqsize) {
   midi.setTPQ(TPQ);
   midi.addTrack(1);
 
-  if (seqsize) {
-
-    for (size_t i = 0; i < (size_t)seqsize; i++) {
-
-      note[1] = seq[i](2), note[2] = seq[i](3);
-      midi.addEvent(1, (int)((atime + seq[i](0)) * TPQ * BPM / 60), note);
-
-      note[2] = 0;
-      midi.addEvent(1, (int)((atime + seq[i](0) + seq[i](1)) * TPQ * BPM / 60),
-                    note);
-
-      cout << "[*] sample: Recorded pre-entered note " << (int)seq[i](2)
-           << " of attack " << (int)seq[i](3) << " ON to " << atime + seq[i](0)
-           << " and OFF to " << atime + seq[i](0) + seq[i](1) << endl;
-
-      atime += seq[i](0);
-    }
-
-    x = seq[seqsize - 1];
-
-  } else {
-
-    x = decode(VectorXd::Random(4));
-
-    note[1] = x(2), note[2] = x(3);
-    midi.addEvent(1, (int)((atime + x(0)) * TPQ * BPM / 60), note);
-
-    note[2] = 0;
-    midi.addEvent(1, (int)((atime + x(0) + x(1)) * TPQ * BPM / 60), note);
-
-    cout << "[*] sample: Recorded pre-entered note " << (int)x(2)
-         << " of attack " << (int)x(3) << " ON to " << atime + x(0)
-         << " and OFF to " << atime + x(0) + x(1) << endl;
-
-    atime += x(0);
-  }
   for (size_t i = 0; i < SAMPLE_SIZE; i++) {
-    mt19937 engine((float)time(NULL));
-    uniform_real_distribution<float> distribution(0, 1000);
-    auto isrand = bind(distribution, engine);
-    if (!int(isrand()) % RAND_CIRCLE) {
-      randtemp = isrand();
-      x(0) = int(randtemp) % (T_MAX - T_MIN) + randtemp - int(randtemp);
-      randtemp = isrand();
-      x(1) = int(randtemp) % (T_MAX - T_MIN) + randtemp - int(randtemp);
-      x(2) = x(2) + N_SAMP - int(isrand()) % (2 * N_SAMP + 1);
-      x(3) = x(3) + A_SAMP - int(isrand()) % (2 * A_SAMP + 1);
-
-      x(0) = max(T_MIN_SAMPLE, x(0));
-      x(0) = min(T_MAX_SAMPLE, x(0));
-      x(1) = max(T_MIN_SAMPLE, x(1));
-      x(1) = min(T_MAX_SAMPLE, x(1));
-      x(2) = max(N_MIN_SAMPLE, x(2));
-      x(2) = min(N_MAX_SAMPLE, x(2));
-      x(3) = max(A_MIN_SAMPLE, x(3));
-      x(3) = min(A_MAX_SAMPLE, x(3));
-    } else {
+    if (i)
       x = predict(&m, x);
+    if (!i || (rand && !i % RAND_NOTE_PERIOD))
+      x = VectorXd::Random(IO_SIZE);
 
-      x(0) = max(T_MIN_SAMPLE, x(0));
-      x(0) = min(T_MAX_SAMPLE, x(0));
-      x(1) = max(T_MIN_SAMPLE, x(1));
-      x(1) = min(T_MAX_SAMPLE, x(1));
-      x(2) = max(N_MIN_SAMPLE, x(2));
-      x(2) = min(N_MAX_SAMPLE, x(2));
-      x(3) = max(A_MIN_SAMPLE, x(3));
-      x(3) = min(A_MAX_SAMPLE, x(3));
-    }
-    n = decode(map(x, cap));
+    n = decode(x);
 
     note[1] = n(2), note[2] = n(3);
     midi.addEvent(1, (int)((atime + n(0)) * TPQ * BPM / 60), note);
@@ -536,7 +472,7 @@ MidiFile sample(model m, VectorXd *seq, int seqsize) {
     note[2] = 0;
     midi.addEvent(1, (int)((atime + n(0) + n(1)) * TPQ * BPM / 60), note);
 
-    cout << "[*] sample: Recorded generated note " << (int)n(2) << " of attack "
+    cout << "[*] sample: Recorded note " << (int)n(2) << " of attack "
          << (int)n(3) << " ON to " << atime + n(0) << " and OFF to "
          << atime + n(0) + n(1) << endl;
 
@@ -551,7 +487,7 @@ model grad_desc(model m, MidiFile midi, double *loss) {
 
   model grad;
   mset_zero(&grad);
-  int check0112 = 1;
+  uint8_t inst=0;
 
   if (!midi.status()) {
     cerr << "[!] Unable to parse MIDI data from argument, skipping..." << endl;
@@ -573,32 +509,21 @@ model grad_desc(model m, MidiFile midi, double *loss) {
   for (size_t i = 0; i < (size_t)midi[0].size(); i++) {
 
     if (midi[0][i].isPatchChange())
-      check0112 = 79 < midi[0][i][1] && midi[0][i][1] < 128;
+      inst=midi[0][i][1];
 
-    if (midi[0][i].isNoteOn() && !check0112) {
+    if (midi[0][i].isNoteOn() && inst<80) {
 
       for (size_t j = 0; j < LAYER_NUM; j++)
-<<<<<<< HEAD
         a[j][batch_size] = m.a[j];
 
       x[batch_size].resize(IO_SIZE);
       x[batch_size] << midi[0][i].seconds - ptime,
-=======
-        a[batch_size - 1][j] = m.a[j];
-      x[batch_size - 1].resize(IO_SIZE);
-      x[batch_size - 1] << midi[0][i].seconds - ptime,
->>>>>>> github0112
           midi[0][i].getDurationInSeconds(), midi[0][i][1], midi[0][i][2];
       x[batch_size] = encode(x[batch_size]);
 
-<<<<<<< HEAD
       y[batch_size] = predict(&m, x[batch_size]);
 
       if (batch_size > 0)
-=======
-      y[batch_size - 1] = predict(&m, x[batch_size - 1]);
-      if (batch_size > 1)
->>>>>>> github0112
         for (size_t j = 0; j < IO_SIZE; j++)
           *loss += (x[batch_size](j) - y[batch_size - 1](j)) *
                    (x[batch_size](j) - y[batch_size - 1](j)) / IO_SIZE;
