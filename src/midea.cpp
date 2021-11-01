@@ -6,6 +6,9 @@
 #include <iostream>
 #include <string>
 #include <thread>
+#include <random>
+#include <ctime>
+#include <functional>
 
 #ifdef __unix__
 #include <unistd.h>
@@ -25,11 +28,13 @@ using std::cout;
 using std::endl;
 using std::getline;
 using std::ifstream;
+using std::mt19937;
 using std::ofstream;
 using std::setw;
 using std::string;
 using std::thread;
 using std::to_string;
+using std::uniform_real_distribution;
 using std::vector;
 
 #define LAYER_NUM 3
@@ -44,11 +49,21 @@ using std::vector;
 #define LEARNING_RATE 0.01
 #define NOTE_ON 0x90
 #define T_MIN 0
+#define T_MIN_SAMPLE 0
 #define T_MAX 3
+#define T_MAX_SAMPLE 3
 #define N_MIN 0x00
+#define N_MIN_SAMPLE 0x00
 #define N_MAX 0x7f
+#define N_MAX_SAMPLE 0x7f
 #define A_MIN 0x01
+#define A_MIN_SAMPLE 0x01
 #define A_MAX 0x7f
+#define A_MAX_SAMPLE 0x7f
+#define RAND_CIRCLE 50
+#define N_SAMP 10
+#define A_SAMP 20
+
 #define MAX_FILE_NUM 200000
 #define MIDI_OUT 1
 #define TPQ 960
@@ -337,7 +352,8 @@ MidiFile sample(model m, VectorXd *seq, int seqsize) {
   vector<uint8_t> note{NOTE_ON, 0, 0};
   VectorXd x(IO_SIZE), n(IO_SIZE);
   double atime = 0;
-
+  int temp=0;
+  float randtemp=0;
   midi.absoluteTicks();
   midi.setTPQ(TPQ);
   midi.addTrack(1);
@@ -378,17 +394,46 @@ MidiFile sample(model m, VectorXd *seq, int seqsize) {
 
     atime += x(0);
   }
-
   for (size_t i = 0; i < SAMPLE_SIZE; i++) {
+    mt19937 engine((float)time(NULL));
+    uniform_real_distribution<float> distribution(0,1000);
+    auto isrand = bind(distribution, engine);
+    if (!int(isrand())%RAND_CIRCLE){
+        randtemp=isrand();
+        x(0)=int(randtemp)%(T_MAX-T_MIN)+randtemp-int(randtemp);
+        randtemp=isrand();
+        x(1)=int(randtemp)%(T_MAX-T_MIN)+randtemp-int(randtemp);
+        x(2)=x(2)+N_SAMP-int(isrand())%(2*N_SAMP+1);
+        x(3)=x(3)+A_SAMP-int(isrand())%(2*A_SAMP+1);
 
-    x = predict(&m, x);
-    n = decode(map(x, cap));
+        x(0)=max(T_MIN_SAMPLE,x(0));
+        x(0)=min(T_MAX_SAMPLE,x(0));
+        x(1)=max(T_MIN_SAMPLE,x(1));
+        x(1)=min(T_MAX_SAMPLE,x(1));
+        x(2)=max(N_MIN_SAMPLE,x(2));
+        x(2)=min(N_MAX_SAMPLE,x(2));
+        x(3)=max(A_MIN_SAMPLE,x(3));
+        x(3)=min(A_MAX_SAMPLE,x(3));
+    }
+    else{
+        x = predict(&m, x);
 
-    note[1] = n(2), note[2] = n(3);
-    midi.addEvent(1, (int)((atime + n(0)) * TPQ * BPM / 60), note);
+        x(0)=max(T_MIN_SAMPLE,x(0));
+        x(0)=min(T_MAX_SAMPLE,x(0));
+        x(1)=max(T_MIN_SAMPLE,x(1));
+        x(1)=min(T_MAX_SAMPLE,x(1));
+        x(2)=max(N_MIN_SAMPLE,x(2));
+        x(2)=min(N_MAX_SAMPLE,x(2));
+        x(3)=max(A_MIN_SAMPLE,x(3));
+        x(3)=min(A_MAX_SAMPLE,x(3));
+    }
+        n = decode(map(x, cap));
 
-    note[2] = 0;
-    midi.addEvent(1, (int)((atime + n(0) + n(1)) * TPQ * BPM / 60), note);
+        note[1] = n(2), note[2] = n(3);
+        midi.addEvent(1, (int)((atime + n(0)) * TPQ * BPM / 60), note);
+
+        note[2] = 0;
+        midi.addEvent(1, (int)((atime + n(0) + n(1)) * TPQ * BPM / 60), note);
 
     cout << "[*] generate: Recorded generated note " << (int)n(2)
          << " of attack " << (int)n(3) << " ON to " << atime + n(0)
