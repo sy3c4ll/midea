@@ -11,41 +11,20 @@
 #ifdef __unix__
 #include <unistd.h>
 #define NULLDEVICE "/dev/null"
-#elif defined _WIN64
+#endif /* __unix__ */
+#ifdef _WIN64
 #include <windows.h>
 #define sleep(x) Sleep((x)*1000)
 #define NULLDEVICE "nul"
-#endif
+#endif /* _WIN64 */
 
-using Eigen::MatrixXd;
-using Eigen::VectorXd;
-using nlohmann::json;
-using smf::MidiFile;
-using std::async;
-using std::cerr;
-using std::cout;
-using std::endl;
-using std::future;
-using std::future_status;
-using std::getline;
-using std::ifstream;
-using std::move;
-using std::mutex;
-using std::ofstream;
-using std::setw;
-using std::string;
-using std::thread;
-using std::to_string;
-using std::vector;
-using std::chrono::duration;
-
-#define LOGFILE "log.txt"
-#define ERRFILE "log.txt"
+//#define ERRFILE "err.txt"
+//#define LOGFILE "log.txt"
 #define LAYER_NUM 3
 #define IO_SIZE 4
 #define H_SIZE 10
 #define EPOCH_NUM 10000
-#define PRL 8
+#define PRL 16
 #define BATCH_SIZE 100
 #define EPOCH_SAMPLE_PERIOD 1
 #define SAMPLE_SIZE 1000
@@ -73,6 +52,28 @@ using std::chrono::duration;
 
 #define min(a,b) ((a)<(b)?(a):(b))
 #define max(a,b) ((a)>(b)?(a):(b))
+
+using Eigen::MatrixXd;
+using Eigen::VectorXd;
+using nlohmann::json;
+using smf::MidiFile;
+using std::async;
+using std::cerr;
+using std::cout;
+using std::endl;
+using std::future;
+using std::future_status;
+using std::getline;
+using std::ifstream;
+using std::move;
+using std::mutex;
+using std::ofstream;
+using std::setw;
+using std::string;
+using std::thread;
+using std::to_string;
+using std::vector;
+using std::chrono::duration;
 
 const string CWD = "./";
 const string DATA_DIR = CWD + "data/";
@@ -104,14 +105,14 @@ double train(model *m, string *spath, string *epath, mutex *lock);
 
 int main(int argc, char **argv) {
 
-#ifdef LOGFILE
-  cout << "[*] LOGFILE defined, redirecting stdout to " << LOGFILE << endl;
-  freopen(LOGFILE, "w", stdout);
-#endif /* LOGFILE */
 #ifdef ERRFILE
   cout << "[*] ERRFILE defined, redirecting stderr to " << ERRFILE << endl;
   freopen(ERRFILE, "w", stderr);
 #endif /* ERRFILE */
+#ifdef LOGFILE
+  cout << "[*] LOGFILE defined, redirecting stdout to " << LOGFILE << endl;
+  freopen(LOGFILE, "w", stdout);
+#endif /* LOGFILE */
 
   model *m = mset_random(new model);
   if (argc == 2)
@@ -164,9 +165,9 @@ int main(int argc, char **argv) {
 
     if (epoch % EPOCH_SAMPLE_PERIOD == 0) {
 
-      msv_save(m, MODEL_DIR + "model-" + to_string(epoch) + ".json");
+      msv_save(m, MODEL_DIR + "model_" + to_string(epoch) + ".json");
       cout << "[" << epoch << "/" << EPOCH_NUM << "] Model saved to "
-           << MODEL_DIR << "model-" << epoch << ".json" << endl;
+           << MODEL_DIR << "model_" << epoch << ".json" << endl;
 
       sample_midi = sample(*m, false);
       cout << "[" << epoch << "/" << EPOCH_NUM << "] MIDI sample generated with 'normal' strategy"
@@ -234,9 +235,9 @@ int main(int argc, char **argv) {
       }
   }
 
-  msv_save(m, MODEL_DIR + "model-" + to_string(EPOCH_NUM) + ".json");
+  msv_save(m, MODEL_DIR + "model_" + to_string(EPOCH_NUM) + ".json");
   cout << "[" << EPOCH_NUM << "/" << EPOCH_NUM << "] Model saved to "
-       << MODEL_DIR << "model-" << EPOCH_NUM << ".json" << endl;
+       << MODEL_DIR << "model_" << EPOCH_NUM << ".json" << endl;
 
   sample_midi = sample(*m, false);
   cout << "[" << EPOCH_NUM << "/" << EPOCH_NUM << "] MIDI sample generated with 'normal' strategy"
@@ -499,16 +500,14 @@ model grad_desc(model m, MidiFile midi, double *loss) {
   midi.doTimeAnalysis();
   midi.linkNotePairs();
   size_t batch_size = 0;
-  VectorXd *x = new VectorXd[MAX_BATCH_SIZE], *y = new VectorXd[MAX_BATCH_SIZE],
-           *a[LAYER_NUM] = {}, d;
-  for (size_t i = 0; i < LAYER_NUM; i++)
-    a[i] = new VectorXd[MAX_BATCH_SIZE];
+  VectorXd x[MAX_BATCH_SIZE] = {}, y[MAX_BATCH_SIZE] = {},
+           a[LAYER_NUM][MAX_BATCH_SIZE] = {}, d;
   double ptime = 0;
   *loss = 0;
 
   for (size_t i = 0; i < (size_t)midi[0].size(); i++) {
 
-    if (midi[0][i].isPatchChange())
+    if (midi[0][i].isTimbre())
       inst=midi[0][i][1];
 
     if (midi[0][i].isNoteOn() && inst<80) {
@@ -572,11 +571,6 @@ model grad_desc(model m, MidiFile midi, double *loss) {
     grad.wxy[0] += d * x[i - 1].transpose();
     grad.b[0] += d;
   }
-
-  delete[] x;
-  delete[] y;
-  for (size_t i = 0; i < LAYER_NUM; i++)
-    delete[] a[i];
 
   return *mop_div(&grad, (double)batch_size);
 }
