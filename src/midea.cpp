@@ -2,6 +2,8 @@
 #include "midifile/MidiFile.h"
 #include "rtmidi/RtMidi.h"
 #include "json/json.hpp"
+#include <cmath>
+#include <cstdlib>
 #include <future>
 #include <iomanip>
 #include <iostream>
@@ -20,6 +22,7 @@
 
 //#define ERRFILE "err.txt"
 //#define LOGFILE "log.txt"
+#define MIDI_OUT 1
 #define LAYER_NUM 3
 #define IO_SIZE 4
 #define H_SIZE 10
@@ -30,28 +33,27 @@
 #define SAMPLE_SIZE 1000
 #define MAX_BATCH_SIZE 100000
 #define ACT_FUNC tanh
-#define LEARNING_RATE 0.01
+#define LEARNING_RATE 0.002
 #define NOTE_ON 0x90
 #define T_MIN_HARD 0
 #define T_MAX_HARD 3
-#define N_MIN_HARD 0x00
-#define N_MAX_HARD 0x7f
-#define A_MIN_HARD 0x01
-#define A_MAX_HARD 0x7f
+#define K_MIN_HARD 0x00
+#define K_MAX_HARD 0x7f
+#define V_MIN_HARD 0x01
+#define V_MAX_HARD 0x7f
 #define T_MIN_SOFT 0
 #define T_MAX_SOFT 3
-#define N_MIN_SOFT 0x00
-#define N_MAX_SOFT 0x7f
-#define A_MIN_SOFT 0x20
-#define A_MAX_SOFT 0x7f
-#define RAND_NOTE_PERIOD 50
+#define K_MIN_SOFT 0x00
+#define K_MAX_SOFT 0x7f
+#define V_MIN_SOFT 0x20
+#define V_MAX_SOFT 0x7f
+#define RAND_NOTE_PERIOD 15
 #define MAX_FILE_NUM 200000
-#define MIDI_OUT 1
 #define TPQ 960
 #define BPM 120
 
-#define min(a,b) ((a)<(b)?(a):(b))
-#define max(a,b) ((a)>(b)?(a):(b))
+#define min(a, b) ((a) < (b) ? (a) : (b))
+#define max(a, b) ((a) > (b) ? (a) : (b))
 
 using Eigen::MatrixXd;
 using Eigen::VectorXd;
@@ -99,7 +101,7 @@ VectorXd predict(model *m, VectorXd x);
 VectorXd encode(VectorXd x);
 VectorXd decode(VectorXd x);
 void play_midi(RtMidiOut *midiout, MidiFile midi);
-MidiFile sample(model m, bool rand);
+MidiFile sample(model m, bool rnd);
 model grad_desc(model m, MidiFile midi, double *loss);
 double train(model *m, string *spath, string *epath, mutex *lock);
 
@@ -116,7 +118,7 @@ int main(int argc, char **argv) {
 
   model *m = mset_random(new model);
   if (argc == 2)
-    msv_load(m, MODEL_DIR + "model-" + argv[1] + ".json");
+    msv_load(m, MODEL_DIR + "model_" + argv[1] + ".json");
   cout << "[*] Model layers, weights and biases initialised" << endl;
 
   ifstream md(DATA_DIR + METADATA_FILE);
@@ -150,6 +152,7 @@ int main(int argc, char **argv) {
   if (!midiout->isPortOpen()) {
     cerr << "[!] Unable to open MIDI output ports, aborting..." << endl;
     exit(EXIT_FAILURE);
+#define MIDI_OUT 1
   }
   cout << "[*] Connected to MIDI output port " << MIDI_OUT << endl;
 #endif /* MIDI_OUT */
@@ -170,26 +173,28 @@ int main(int argc, char **argv) {
            << MODEL_DIR << "model_" << epoch << ".json" << endl;
 
       sample_midi = sample(*m, false);
-      cout << "[" << epoch << "/" << EPOCH_NUM << "] MIDI sample generated with 'normal' strategy"
-           << endl;
+      cout << "[" << epoch << "/" << EPOCH_NUM
+           << "] MIDI sample generated with 'normal' strategy" << endl;
 
-      sample_midi.write(SAMPLE_DIR + "sample_norm_" + to_string(epoch) + ".mid");
+      sample_midi.write(SAMPLE_DIR + "sample_norm_" + to_string(epoch) +
+                        ".mid");
       cout << "[" << epoch << "/" << EPOCH_NUM << "] MIDI sample saved to "
            << SAMPLE_DIR << "sample_norm_" << epoch << ".mid" << endl;
 
       sample_midi = sample(*m, true);
-      cout << "[" << epoch << "/" << EPOCH_NUM << "] MIDI sample generated with 'random' strategy"
-           << endl;
+      cout << "[" << epoch << "/" << EPOCH_NUM
+           << "] MIDI sample generated with 'random' strategy" << endl;
 
-      sample_midi.write(SAMPLE_DIR + "sample_rand_" + to_string(epoch) + ".mid");
+      sample_midi.write(SAMPLE_DIR + "sample_rand_" + to_string(epoch) +
+                        ".mid");
       cout << "[" << epoch << "/" << EPOCH_NUM << "] MIDI sample saved to "
            << SAMPLE_DIR << "sample_rand_" << epoch << ".mid" << endl;
 
       if (midiout != NULL) {
         player = thread(play_midi, midiout, sample_midi);
         player.detach();
-        cout << "[" << epoch << "/" << EPOCH_NUM << "] Now playing: sample_rand_"<<epoch
-             << endl;
+        cout << "[" << epoch << "/" << EPOCH_NUM
+             << "] Now playing: sample_rand_" << epoch << endl;
       }
     }
 
@@ -240,26 +245,28 @@ int main(int argc, char **argv) {
        << MODEL_DIR << "model_" << EPOCH_NUM << ".json" << endl;
 
   sample_midi = sample(*m, false);
-  cout << "[" << EPOCH_NUM << "/" << EPOCH_NUM << "] MIDI sample generated with 'normal' strategy"
-       << endl;
+  cout << "[" << EPOCH_NUM << "/" << EPOCH_NUM
+       << "] MIDI sample generated with 'normal' strategy" << endl;
 
-  sample_midi.write(SAMPLE_DIR + "sample_norm_" + to_string(EPOCH_NUM) + ".mid");
+  sample_midi.write(SAMPLE_DIR + "sample_norm_" + to_string(EPOCH_NUM) +
+                    ".mid");
   cout << "[" << EPOCH_NUM << "/" << EPOCH_NUM << "] MIDI sample saved to "
        << SAMPLE_DIR << "sample_norm_" << EPOCH_NUM << ".mid" << endl;
 
   sample_midi = sample(*m, true);
-  cout << "[" << EPOCH_NUM << "/" << EPOCH_NUM << "] MIDI sample generated with 'random' strategy"
-       << endl;
+  cout << "[" << EPOCH_NUM << "/" << EPOCH_NUM
+       << "] MIDI sample generated with 'random' strategy" << endl;
 
-  sample_midi.write(SAMPLE_DIR + "sample_rand_" + to_string(EPOCH_NUM) + ".mid");
+  sample_midi.write(SAMPLE_DIR + "sample_rand_" + to_string(EPOCH_NUM) +
+                    ".mid");
   cout << "[" << EPOCH_NUM << "/" << EPOCH_NUM << "] MIDI sample saved to "
        << SAMPLE_DIR << "sample_rand_" << EPOCH_NUM << ".mid" << endl;
 
   if (midiout != NULL) {
     player = thread(play_midi, midiout, sample_midi);
     player.join();
-    cout << "[" << EPOCH_NUM << "/" << EPOCH_NUM << "] Now playing: sample 1"
-         << endl;
+    cout << "[" << EPOCH_NUM << "/" << EPOCH_NUM
+         << "] Now playing: sample_rand_" << EPOCH_NUM << endl;
   }
 
   cout << "[*] Model successfully trained over " << EPOCH_NUM
@@ -411,17 +418,25 @@ VectorXd encode(VectorXd x) {
 
   x(0) = (x(0) - T_MIN_HARD) / (T_MAX_HARD - T_MIN_HARD) * 2 - 1;
   x(1) = (x(1) - T_MIN_HARD) / (T_MAX_HARD - T_MIN_HARD) * 2 - 1;
-  x(2) = (x(2) - N_MIN_HARD) / (N_MAX_HARD - N_MIN_HARD) * 2 - 1;
-  x(3) = (x(3) - A_MIN_HARD) / (A_MAX_HARD - A_MIN_HARD) * 2 - 1;
+  x(2) = (x(2) - K_MIN_HARD) / (K_MAX_HARD - K_MIN_HARD) * 2 - 1;
+  x(3) = (x(3) - V_MIN_HARD) / (V_MAX_HARD - V_MIN_HARD) * 2 - 1;
   return x;
 }
 
 VectorXd decode(VectorXd x) {
 
-  x(0) = min(max((x(0) + 1) * (T_MAX_HARD - T_MIN_HARD) / 2 + T_MIN_HARD,T_MIN_SOFT),T_MAX_SOFT);
-  x(1) = min(max((x(1) + 1) * (T_MAX_HARD - T_MIN_HARD) / 2 + T_MIN_HARD,T_MIN_SOFT),T_MAX_SOFT);
-  x(2) = round(min(max((x(2) + 1) * (N_MAX_HARD - N_MIN_HARD) / 2 + N_MIN_HARD,N_MIN_SOFT),N_MAX_SOFT));
-  x(3) = round(min(max((x(3) + 1) * (A_MAX_HARD - A_MIN_HARD) / 2 + A_MIN_HARD,A_MIN_SOFT),A_MAX_SOFT));
+  x(0) = min(
+      max((x(0) + 1) * (T_MAX_HARD - T_MIN_HARD) / 2 + T_MIN_HARD, T_MIN_SOFT),
+      T_MAX_SOFT);
+  x(1) = min(
+      max((x(1) + 1) * (T_MAX_HARD - T_MIN_HARD) / 2 + T_MIN_HARD, T_MIN_SOFT),
+      T_MAX_SOFT);
+  x(2) = round(min(
+      max((x(2) + 1) * (K_MAX_HARD - K_MIN_HARD) / 2 + K_MIN_HARD, K_MIN_SOFT),
+      K_MAX_SOFT));
+  x(3) = round(min(
+      max((x(3) + 1) * (V_MAX_HARD - V_MIN_HARD) / 2 + V_MIN_HARD, V_MIN_SOFT),
+      V_MAX_SOFT));
   return x;
 }
 
@@ -447,14 +462,12 @@ void play_midi(RtMidiOut *midiout, MidiFile midi) {
   return;
 }
 
-MidiFile sample(model m, bool rand) {
+MidiFile sample(model m, bool rnd) {
 
   MidiFile midi;
   vector<uint8_t> note{NOTE_ON, 0, 0};
   VectorXd x(IO_SIZE), n(IO_SIZE);
-  double atime = 0;
-  int temp = 0;
-  float randtemp = 0;
+  double atime = 0, nterm = 0;
   midi.absoluteTicks();
   midi.setTPQ(TPQ);
   midi.addTrack(1);
@@ -462,8 +475,11 @@ MidiFile sample(model m, bool rand) {
   for (size_t i = 0; i < SAMPLE_SIZE; i++) {
     if (i)
       x = predict(&m, x);
-    if (!i || (rand && !i % RAND_NOTE_PERIOD))
+    if (!i || (rnd && !(rand() % RAND_NOTE_PERIOD))) {
+      nterm = x(0);
       x = VectorXd::Random(IO_SIZE);
+      x(0) = nterm;
+    }
 
     n = decode(x);
 
@@ -488,7 +504,7 @@ model grad_desc(model m, MidiFile midi, double *loss) {
 
   model grad;
   mset_zero(&grad);
-  uint8_t inst=0;
+  uint8_t inst = 0;
 
   if (!midi.status()) {
     cerr << "[!] Unable to parse MIDI data from argument, skipping..." << endl;
@@ -505,12 +521,12 @@ model grad_desc(model m, MidiFile midi, double *loss) {
   double ptime = 0;
   *loss = 0;
 
-  for (size_t i = 0; i < (size_t)midi[0].size(); i++) {
+  for (size_t i = 0; i < MAX_BATCH_SIZE && i < (size_t)midi[0].size(); i++) {
 
     if (midi[0][i].isTimbre())
-      inst=midi[0][i][1];
+      inst = midi[0][i][1];
 
-    if (midi[0][i].isNoteOn() && inst<80) {
+    if (midi[0][i].isNoteOn() && inst < 80) {
 
       for (size_t j = 0; j < LAYER_NUM; j++)
         a[j][batch_size] = m.a[j];
@@ -591,7 +607,7 @@ double train(model *m, string *spath, string *epath, mutex *lock) {
       if (!midi.status()) {
         cerr << "[!] Invalid MIDI data, " << *path
              << " will be excluded from training" << endl;
-        *path = "";
+        path->erase();
         continue;
       }
 
