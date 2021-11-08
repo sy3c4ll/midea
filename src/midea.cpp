@@ -48,6 +48,7 @@
 #define V_MIN_SOFT 0x20
 #define V_MAX_SOFT 0x7f
 #define RAND_NOTE_PERIOD 15
+#define REPEAT_NOTE 5
 #define MAX_FILE_NUM 200000
 #define TPQ 960
 #define BPM 120
@@ -466,7 +467,7 @@ MidiFile sample(model m, bool rnd) {
 
   MidiFile midi;
   vector<uint8_t> note{NOTE_ON, 0, 0};
-  VectorXd x(IO_SIZE), n(IO_SIZE);
+  VectorXd x(IO_SIZE), n(IO_SIZE), r[REPEAT_NOTE] = {};
   double atime = 0, nterm = 0;
   midi.absoluteTicks();
   midi.setTPQ(TPQ);
@@ -475,11 +476,11 @@ MidiFile sample(model m, bool rnd) {
   for (size_t i = 0; i < SAMPLE_SIZE; i++) {
     if (i)
       x = predict(&m, x);
-    if (!i || (rnd && !(rand() % RAND_NOTE_PERIOD))) {
-      nterm = x(0);
-      x = VectorXd::Random(IO_SIZE);
-      x(0) = nterm;
-    }
+    if (!i ||
+        (rnd && i >= RAND_NOTE_PERIOD && i % RAND_NOTE_PERIOD < REPEAT_NOTE))
+      x = r[i % RAND_NOTE_PERIOD];
+    if (i < REPEAT_NOTE)
+      r[i] = VectorXd(x);
 
     n = decode(x);
 
